@@ -660,15 +660,32 @@ bot.on("text", async function(ctx) {
   const userId = ctx.from.id;
   const userMessage = ctx.message.text;
 
-  // Skip if message is too long (likely raw data dump)
+  // Auto-summarize if message too long
+  let processedMessage = userMessage;
   if (userMessage.length > 3000) {
-    return ctx.reply("消息太长了！请把内容分成小段发送，或者总结后再发给我。");
+    try {
+      await ctx.sendChatAction("typing");
+      const summaryRes = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 800,
+        messages: [{
+          role: "user",
+          content: "请把以下内容压缩成简洁的摘要，保留所有关键信息、代码、链接和数字，不要丢失重要细节：\n\n" + userMessage
+        }]
+      });
+      const summary = (summaryRes.content[0] || {}).text || userMessage;
+      processedMessage = "[自动压缩摘要]\n" + summary;
+      console.log("Auto-summarized message from", userMessage.length, "to", processedMessage.length, "chars");
+    } catch (err) {
+      console.error("Auto-summarize failed:", err.message);
+      processedMessage = userMessage.substring(0, 3000) + "...[内容过长已截断]";
+    }
   }
 
   await ctx.sendChatAction("typing");
   try {
     const result = await withLock(userId, async function() {
-      return await askClaude(userId, userMessage);
+      return await askClaude(userId, processedMessage);
     });
     if (result) {
       await sendLongMessage(ctx, result);
