@@ -52,10 +52,10 @@ async function withLock(userId, fn) {
   }
 }
 
-const RECENT_MESSAGES = 15;
-const MAX_SUMMARIES = 5;
+const RECENT_MESSAGES = 50;
+const MAX_SUMMARIES = 8;
 const SUMMARIZE_EVERY = 20;
-const TOP_MEMORIES = 8;
+const TOP_MEMORIES = 12;
 
 // ── 对话记录 ──────────────────────────────────────────────────────────────────
 async function getHistory(userId) {
@@ -737,7 +737,45 @@ bot.on("photo", async function(ctx) {
 });
 
 bot.on("document", async function(ctx) {
-  await ctx.reply("I cannot read files directly yet - copy-paste the text and I will help!");
+  const doc = ctx.message && ctx.message.document;
+  if (!doc) return;
+  const mime = doc.mime_type || "";
+
+  if (mime === "application/pdf") {
+    const userId = ctx.from.id;
+    await ctx.sendChatAction("upload_document");
+    try {
+      const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+      const response = await fetch(fileLink.href);
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString("base64");
+      await ctx.sendChatAction("typing");
+      const caption = ctx.message.caption || "请分析这份 PDF 文档，给我摘要和关键要点。";
+      const result = await withLock(userId, async function() {
+        const systemPrompt = await buildSystemPrompt(userId, caption);
+        const pdfResponse = await anthropic.messages.create({
+          model: "claude-opus-4-5",
+          max_tokens: 4096,
+          system: systemPrompt,
+          messages: [{ role: "user", content: [
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+            { type: "text", text: caption }
+          ]}]
+        });
+        return (pdfResponse.content[0] || {}).text || "无法分析此 PDF。";
+      });
+      if (result) {
+        await saveMessage(userId, "user", "[PDF: " + (doc.file_name || "document.pdf") + "] " + caption);
+        await saveMessage(userId, "assistant", result);
+        await sendLongMessage(ctx, result);
+      }
+    } catch (err) {
+      console.error("PDF error:", err.message);
+      await ctx.reply("PDF 处理失败: " + err.message);
+    }
+  } else {
+    await ctx.reply("目前只支持 PDF 文件，其他格式暂不支持。");
+  }
 });
 
 // ── 启动 ──────────────────────────────────────────────────────────────────────
@@ -759,5 +797,68 @@ async function launch() {
 }
 
 launch().catch(console.error);
+
+// PDF 文件处理
+bot.on(["message"], async function(ctx) {
+  const doc = ctx.message && ctx.message.document;
+  if (!doc) return;
+  const mime = doc.mime_type || "";
+  if (mime !== "application/pdf") return;
+
+  const userId = ctx.from.id;
+  await ctx.sendChatAction("upload_document");
+
+  try {
+    const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+    const response = await fetch(fileLink.href);
+    const arrayBuffer = await response.arrayBuffer();
+    const base64 = Buffer.from(arrayBuffer).toString("base64");
+
+    await ctx.sendChatAction("typing");
+    const caption = ctx.message.caption || "请分析这份 PDF 文档，给我摘要和关键要点。";
+
+    const result = await withLock(userId, async function() {
+      const docs = await Promise.all([
+        getDoc(userId, "soul"),
+        getDoc(userId, "projects"),
+        getDoc(userId, "tasks"),
+        getDoc(userId, "notes")
+      ]);
+      const [soul, projects, tasks, notes] = docs;
+      let systemPrompt = SYSTEM_PROMPT;
+      if (soul) systemPrompt += "\n\n[USER PROFILE]\n" + soul;
+      if (projects) systemPrompt += "\n\n[PROJECTS]\n" + projects;
+      if (tasks) systemPrompt += "\n\n[TASKS]\n" + tasks;
+      if (notes) systemPrompt += "\n\n[NOTES]\n" + notes;
+
+      const pdfResponse = await anthropic.messages.create({
+        model: "claude-opus-4-5",
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: base64 }
+            },
+            { type: "text", text: caption }
+          ]
+        }]
+      });
+      return (pdfResponse.content[0] || {}).text || "无法分析此 PDF。";
+    });
+
+    if (result) {
+      await saveMessage(userId, "user", "[PDF: " + (doc.file_name || "document.pdf") + "] " + caption);
+      await saveMessage(userId, "assistant", result);
+      await sendLongMessage(ctx, result);
+    }
+  } catch (err) {
+    console.error("PDF error:", err.message);
+    await ctx.reply("PDF 处理失败: " + err.message);
+  }
+});
+
 process.once("SIGINT", function() { bot.stop("SIGINT"); });
 process.once("SIGTERM", function() { bot.stop("SIGTERM"); });
