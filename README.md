@@ -29,6 +29,7 @@ Built by [@0xKingsKuan](https://x.com/0xKingsKuan)
   - 对话摘要 - 自动压缩长对话
 - 智能网络搜索 - Claude 自动判断是否需要搜索最新资讯
 - 图片识别 - 发图片直接分析
+- PDF 支持 - 发 PDF 文件直接分析/总结，可加说明如”找合同关键条款”
 - 长内容输出 - 不会中途停止
 - 多语言 - 你说什么语言它就回什么语言
 - 24/7 云端运行
@@ -122,14 +123,15 @@ create table if not exists memories (
 
 点击上方 Deploy on Railway 按钮，填入以下变量：
 
-|变量名              |说明                       |必填  |
-|-----------------|-------------------------|----|
-|BOT_TOKEN        |Telegram Bot Token       |必填  |
-|ANTHROPIC_API_KEY|Anthropic API Key        |必填  |
-|SUPABASE_URL     |Supabase Project URL     |强烈建议|
-|SUPABASE_KEY     |Supabase service_role key|强烈建议|
-|TAVILY_API_KEY   |Tavily API Key           |可选  |
-|VOYAGE_API_KEY   |Voyage API Key           |可选  |
+|变量名              |说明                          |必填              |
+|-----------------|----------------------------|----------------|
+|BOT_TOKEN        |Telegram Bot Token          |必填              |
+|ANTHROPIC_API_KEY|Anthropic API Key           |必填              |
+|SUPABASE_URL     |Supabase Project URL        |强烈建议            |
+|SUPABASE_KEY     |Supabase service_role key   |强烈建议            |
+|TAVILY_API_KEY   |Tavily API Key              |可选              |
+|VOYAGE_API_KEY   |Voyage API Key              |可选              |
+|GITHUB_TOKEN     |GitHub Personal Access Token|Vibe Coding 功能需要|
 
 重要：SUPABASE_KEY 必须用 service_role key，不能用 anon public key。
 
@@ -179,6 +181,11 @@ create table if not exists memories (
 - /note [内容] - 添加笔记
 - /clearnotes - 清空笔记
 - /summarize - 立即压缩摘要
+
+Vibe Coding：
+
+- /vibe - 启动 AI 辅助建项目（自动生成代码 + 推送 GitHub）
+- /vibestop - 退出 Vibe Coding 模式
 
 管理：
 
