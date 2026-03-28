@@ -123,15 +123,16 @@ create table if not exists memories (
 
 点击上方 Deploy on Railway 按钮，填入以下变量：
 
-|变量名              |说明                          |必填              |
-|-----------------|----------------------------|----------------|
-|BOT_TOKEN        |Telegram Bot Token          |必填              |
-|ANTHROPIC_API_KEY|Anthropic API Key           |必填              |
-|SUPABASE_URL     |Supabase Project URL        |强烈建议            |
-|SUPABASE_KEY     |Supabase service_role key   |强烈建议            |
-|TAVILY_API_KEY   |Tavily API Key              |可选              |
-|VOYAGE_API_KEY   |Voyage API Key              |可选              |
-|GITHUB_TOKEN     |GitHub Personal Access Token|Vibe Coding 功能需要|
+|变量名              |说明                                          |必填              |
+|-----------------|--------------------------------------------|----------------|
+|BOT_TOKEN        |Telegram Bot Token                          |必填              |
+|ANTHROPIC_API_KEY|Anthropic API Key                           |必填              |
+|SUPABASE_URL     |Supabase Project URL                        |强烈建议            |
+|SUPABASE_KEY     |Supabase service_role key                   |强烈建议            |
+|TAVILY_API_KEY   |Tavily API Key                              |可选              |
+|VOYAGE_API_KEY   |Voyage API Key                              |可选              |
+|GITHUB_TOKEN     |GitHub Personal Access Token                |Vibe Coding 功能需要|
+|RAILWAY_API_TOKEN|Railway API Token（Account Settings → Tokens）|自动部署功能需要        |
 
 重要：SUPABASE_KEY 必须用 service_role key，不能用 anon public key。
 
@@ -186,6 +187,7 @@ Vibe Coding：
 
 - /vibe - 启动 AI 辅助建项目（自动生成代码 + 推送 GitHub）
 - /vibestop - 退出 Vibe Coding 模式
+- /deploy [GitHub链接] - 自动部署到 Railway（可附带环境变量）
 
 管理：
 
