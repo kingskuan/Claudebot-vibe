@@ -498,15 +498,65 @@ async function askClaude(userId, userMessage) {
 
 // ── 发送长消息 ────────────────────────────────────────────────────────────────
 async function sendLongMessage(ctx, text) {
-  const MAX = 4000;
+  const MAX = 3800;
   if (text.length <= MAX) { await ctx.reply(text); return; }
+
+  const chunks = [];
   let remaining = text;
+
   while (remaining.length > 0) {
-    if (remaining.length <= MAX) { await ctx.reply(remaining); break; }
-    let splitAt = remaining.lastIndexOf("\n", MAX);
-    if (splitAt === -1) splitAt = MAX;
-    await ctx.reply(remaining.substring(0, splitAt));
+    if (remaining.length <= MAX) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Count open code blocks to avoid splitting inside one
+    const slice = remaining.substring(0, MAX);
+    const codeBlockCount = (slice.match(/```/g) || []).length;
+    const insideCodeBlock = codeBlockCount % 2 !== 0;
+
+    let splitAt = -1;
+
+    if (insideCodeBlock) {
+      // Find the last closing ``` before MAX
+      const lastClose = slice.lastIndexOf("```");
+      if (lastClose > 100) {
+        splitAt = lastClose + 3; // include the closing ```
+      }
+    }
+
+    // Fall back to last newline before MAX
+    if (splitAt === -1) {
+      splitAt = remaining.lastIndexOf("\n", MAX);
+    }
+    if (splitAt === -1 || splitAt < 100) {
+      splitAt = MAX;
+    }
+
+    let chunk = remaining.substring(0, splitAt).trim();
+
+    // If we cut inside a code block, close it
+    const openBlocks = (chunk.match(/```/g) || []).length;
+    if (openBlocks % 2 !== 0) {
+      chunk += "\n```";
+    }
+
+    chunks.push(chunk);
     remaining = remaining.substring(splitAt).trim();
+
+    // If next chunk starts mid-code-block, reopen it
+    if (openBlocks % 2 !== 0 && remaining.length > 0) {
+      remaining = "```\n" + remaining;
+    }
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    if (chunks.length > 1) {
+      await ctx.reply(chunks[i] + (i < chunks.length - 1 ? "\n\n[" + (i + 1) + "/" + chunks.length + "]" : ""));
+    } else {
+      await ctx.reply(chunks[i]);
+    }
+    if (i < chunks.length - 1) await new Promise(function(r) { setTimeout(r, 300); });
   }
 }
 
@@ -912,7 +962,51 @@ bot.on("document", async function(ctx) {
       await ctx.reply("PDF 处理失败: " + err.message);
     }
   } else {
-    await ctx.reply("目前只支持 PDF 文件，其他格式暂不支持。");
+    // Handle text-based files: log, txt, csv, json, js, py, etc
+    const textMimes = ["text/", "application/json", "application/javascript", "application/x-python"];
+    const textExts = [".log", ".txt", ".csv", ".json", ".js", ".py", ".ts", ".sh", ".md", ".yaml", ".yml", ".env", ".cjs", ".mjs"];
+    const fileName = doc.file_name || "";
+    const isTextFile = textMimes.some(function(m) { return mime.startsWith(m); }) ||
+                       textExts.some(function(e) { return fileName.toLowerCase().endsWith(e); });
+
+    if (isTextFile) {
+      const userId = ctx.from.id;
+      await ctx.sendChatAction("typing");
+      try {
+        const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+        const response = await fetch(fileLink.href);
+        const text = await response.text();
+        const caption = ctx.message.caption || "分析这个文件，找出关键信息、错误或问题。";
+
+        // Truncate if too long
+        const maxChars = 8000;
+        const fileContent = text.length > maxChars
+          ? text.substring(0, maxChars) + "\n...[文件过长，已截断前 " + maxChars + " 字符]"
+          : text;
+
+        const result = await withLock(userId, async function() {
+          const systemPrompt = await buildSystemPrompt(userId, caption);
+          const res = await anthropic.messages.create({
+            model: "claude-opus-4-5",
+            max_tokens: 4096,
+            system: systemPrompt,
+            messages: [{ role: "user", content: "文件名: " + fileName + "\n\n文件内容:\n" + fileContent + "\n\n" + caption }]
+          });
+          return (res.content[0] || {}).text || "无法分析此文件。";
+        });
+
+        if (result) {
+          await saveMessage(userId, "user", "[文件: " + fileName + "] " + caption);
+          await saveMessage(userId, "assistant", result);
+          await sendLongMessage(ctx, result);
+        }
+      } catch (err) {
+        console.error("File error:", err.message);
+        await ctx.reply("文件处理失败: " + err.message);
+      }
+    } else {
+      await ctx.reply("暂不支持此文件格式。支持：PDF、log、txt、csv、json、js、py 等文字文件。");
+    }
   }
 });
 
