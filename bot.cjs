@@ -89,9 +89,10 @@ async function getHistory(userId) {
         .from("conversations")
         .select("role, content")
         .eq("user_id", userId)
+        .not("role", "eq", "stats")
         .order("created_at", { ascending: false })
         .limit(RECENT_MESSAGES);
-      return (data || []).reverse();
+      return (data || []).filter(function(m) { return m.role === "user" || m.role === "assistant"; }).reverse();
     } catch (err) { console.error("getHistory error:", err.message); }
   }
   const h = memoryStore.get(userId) || [];
@@ -323,8 +324,94 @@ async function searchMemories(userId, query) {
 
 // ── 自动学习 ──────────────────────────────────────────────────────────────────
 
+
+
+// ── Token 使用追踪 ────────────────────────────────────────────────────────────
+const tokenUsage = new Map(); // userId → { input, output, calls, saved }
+
+function trackTokens(userId, inputTokens, outputTokens) {
+  const existing = tokenUsage.get(userId) || { input: 0, output: 0, calls: 0 };
+  tokenUsage.set(userId, {
+    input: existing.input + (inputTokens || 0),
+    output: existing.output + (outputTokens || 0),
+    calls: existing.calls + 1
+  });
+}
+
+// Auto-optimize based on usage patterns
+function autoOptimize(userId) {
+  const usage = tokenUsage.get(userId);
+  if (!usage || usage.calls < 5) return null;
+  const avgOutput = usage.output / usage.calls;
+  const tips = [];
+  if (avgOutput > 4000) tips.push("回复很长 — 对话中多用 /forget 清历史减少 context");
+  if (usage.calls > 50) tips.push("使用频繁 — 代码任务尽量用 /fix 修改而非重新生成");
+  if (usage.input / usage.calls > 5000) tips.push("system prompt 太大 — 发 /soul 检查是否过长");
+  return tips.length > 0 ? tips : null;
+}
+
+function estimateCost(input, output) {
+  // Claude Opus 4: $15/M input, $75/M output
+  const inputCost = (input / 1000000) * 15;
+  const outputCost = (output / 1000000) * 75;
+  return (inputCost + outputCost).toFixed(4);
+}
+
+// ── AutoCompact: 自动上下文压缩 ──────────────────────────────────────────────
+const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3;
+const autoCompactFailures = new Map(); // userId → failure count
+
+async function autoCompact(userId) {
+  const failures = autoCompactFailures.get(userId) || 0;
+  if (failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
+    console.log("autoCompact disabled for user " + userId + " after " + failures + " failures");
+    return false;
+  }
+
+  try {
+    const history = await getHistory(userId);
+    if (history.length < 10) return false; // not enough to compact
+
+    const totalChars = history.reduce(function(sum, m) { return sum + (m.content || "").length; }, 0);
+    if (totalChars < 15000) return false; // not big enough to bother
+
+    // Compress history into a structured summary
+    const historyText = history.map(function(m) {
+      return m.role.toUpperCase() + ": " + (m.content || "").substring(0, 500);
+    }).join("\n");
+
+    const res = await anthropic.messages.create({
+      model: FAST_MODEL, max_tokens: 1000,
+      messages: [{ role: "user", content: "Compress this conversation history into a concise summary that preserves:\n1. Key decisions made\n2. Code/projects discussed\n3. Tasks assigned\n4. Important facts\n\nHistory:\n" + historyText + "\n\nReturn a concise summary in Chinese (max 800 chars):" }]
+    });
+
+    const summary = (res.content[0] || {}).text || "";
+    if (!summary || summary.length < 50) throw new Error("Empty summary");
+
+    // Save as summary and clear old history
+    await saveSummary(userId, "[AutoCompact] " + summary);
+    await clearHistory(userId);
+
+    autoCompactFailures.set(userId, 0); // reset failures
+    console.log("autoCompact success for user " + userId + ": " + totalChars + " chars → " + summary.length + " chars");
+    return true;
+
+  } catch (err) {
+    const newFailures = (autoCompactFailures.get(userId) || 0) + 1;
+    autoCompactFailures.set(userId, newFailures);
+    console.error("autoCompact failed (" + newFailures + "/" + MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES + "):", err.message);
+    return false;
+  }
+}
+
 // ── autoDream: 后台记忆整理系统 ────────────────────────────────────────────────
+const autoDreamLastRun = new Map();
+
 async function autoDream(userId) {
+  const now = Date.now();
+  const last = autoDreamLastRun.get(userId) || 0;
+  if (now - last < 60 * 60 * 1000) return; // max once per hour
+  autoDreamLastRun.set(userId, now);
   try {
     const docs = await getAllDocs(userId);
     if (!docs.notes && !docs.soul && !docs.projects) return;
@@ -573,6 +660,38 @@ async function askClaude(userId, userMessage, ctx) {
     }
   }
 
+  // Auto 2-pass for code generation requests → single .txt file
+  const lastMsgContent = messages.length > 0 ? String(messages[messages.length-1].content) : "";
+  const isCodeRequest = lastMsgContent.length < 300 &&
+    /完整|complete|给我.*代码|写.*完整|v\d+|修复版|整个.*代码|不.*完整|继续|要$/.test(lastMsgContent);
+
+  if (isCodeRequest) {
+    if (ctx) { try { await ctx.reply("💻 代码生成中，自动合并为完整文件..."); } catch(e) {} }
+    const r1 = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 8192, system: activeSystemPrompt,
+      messages: [...messages.slice(0,-1), { role: "user", content: lastMsgContent + "\n\nWrite the FIRST HALF only. End with: # === PART 2 CONTINUES ===" }]
+    });
+    const p1 = ((r1.content[0]||{}).text||"").replace(/```[\w]*\n?|```$/gm,"").trim();
+    if (ctx) { try { await ctx.reply("⚙️ 生成后半部分..."); } catch(e) {} }
+    const r2 = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 8192, system: activeSystemPrompt,
+      messages: [...messages.slice(0,-1), { role:"user", content: lastMsgContent }, { role:"assistant", content: p1 }, { role:"user", content: "Continue with the SECOND HALF. Start from where you left off. Code only." }]
+    });
+    const p2 = ((r2.content[0]||{}).text||"").replace(/```[\w]*\n?|```$/gm,"").trim();
+    const fullCode = p1 + "\n\n" + p2;
+    if (ctx && fullCode.length > 100) {
+      const buf = Buffer.from(fullCode, "utf-8");
+      const ts = new Date().toISOString().slice(11,16).replace(":","");
+      try {
+        await withRetry(function() {
+          return ctx.replyWithDocument({ source: buf, filename: "code_" + ts + ".txt" }, { caption: "✅ 完整代码\n\n用 /save [版本名] 保存" });
+        });
+        return null;
+      } catch(e) {}
+    }
+    return fullCode;
+  }
+
   // Streaming response
   let reply = "";
   let sentMsg = null;
@@ -598,7 +717,15 @@ async function askClaude(userId, userMessage, ctx) {
     // Send initial placeholder
     if (ctx) sentMsg = await ctx.reply("...");
 
+    let inputTokenCount = 0;
+    let outputTokenCount = 0;
     for await (const event of stream) {
+      if (event.type === "message_start" && event.message && event.message.usage) {
+        inputTokenCount = event.message.usage.input_tokens || 0;
+      }
+      if (event.type === "message_delta" && event.usage) {
+        outputTokenCount = event.usage.output_tokens || 0;
+      }
       if (event.type === "content_block_delta" && event.delta && event.delta.type === "text_delta") {
         reply += event.delta.text;
         const now = Date.now();
@@ -610,6 +737,16 @@ async function askClaude(userId, userMessage, ctx) {
         }
       }
     }
+
+    trackTokens(userId, inputTokenCount, outputTokenCount);
+  // Persist to Supabase async
+  if (supabase && (inputTokenCount || outputTokenCount)) {
+    supabase.from("conversations").insert({
+      user_id: parseInt(userId),
+      role: "stats",
+      content: JSON.stringify({ input: inputTokenCount, output: outputTokenCount, ts: Date.now() })
+    }).then(function(){}).catch(function(){});
+  }
 
     // Clear typing interval and delete placeholder
     if (ctx && sentMsg) {
@@ -643,9 +780,12 @@ async function askClaude(userId, userMessage, ctx) {
     const tasks = [maybeAutoSummarize(userId)];
     if (count % 5 === 0) tasks.push(autoLearnMemory(userId, userMessage, reply));
     if (count % 10 === 0) tasks.push(autoDream(userId));
+    if (count % 15 === 0) tasks.push(autoCompact(userId));
     return Promise.all(tasks);
   }).catch(function(err) { console.error("Background error:", err.message); });
 
+  // Mark that streaming already showed this - caller should not call sendLongMessage
+  if (reply) reply.__streamedAlready = true;
   return reply;
 }
 
@@ -972,6 +1112,66 @@ setInterval(function() {
     }
   });
 }, 60000);
+
+async function autoAnalyzeAndFix(ctx, userId, fileName, fileText) {
+  await ctx.reply("🔍 分析 " + fileName + "（" + fileText.length + " 字符）...");
+  setImmediate(async function() {
+    try {
+      const sample = fileText.length > 20000 ? fileText.substring(0, 20000) + "\n...[截断]" : fileText;
+      const res = await anthropic.messages.create({
+        model: MAIN_MODEL, max_tokens: 2000,
+        system: "You are a senior code reviewer. Be specific and actionable. Reply in Chinese.",
+        messages: [{ role: "user", content: "分析这个文件，找出：1. Bug和错误 2. 缺失功能 3. 风险点 4. 优化机会\n\n文件：" + fileName + "\n\n" + sample }]
+      });
+      const analysis = (res.content[0] || {}).text || "";
+      await sendLongMessage(ctx, "📊 **" + fileName + " 分析**\n\n" + analysis);
+      await ctx.reply("要生成修复版吗？回复 '修复' 或说明要改什么");
+      pendingFix.set(userId, { waiting: true, instructions: "__auto__", originalCode: fileText, fileName, createdAt: Date.now() });
+    } catch (err) {
+      await ctx.reply("分析失败: " + err.message).catch(function(){});
+    }
+  });
+}
+
+async function processFileFix(ctx, userId, fileName, fileText, instructions) {
+  await ctx.reply("📖 读取完毕（" + fileText.length + " 字符）\n⚙️ [1/2] 生成前半部分...");
+  setImmediate(async function() {
+    try {
+      const sysPrompt = "You are an expert programmer. Fix/modify code as instructed. Output ONLY code, no explanations, no markdown backticks. Never truncate.";
+      const src = fileText.length > 25000 ? fileText.substring(0, 25000) : fileText;
+      const userMsg = "File: " + fileName + "\n\nInstructions: " + instructions + "\n\nOriginal code:\n" + src;
+      const r1 = await anthropic.messages.create({
+        model: MAIN_MODEL, max_tokens: 8192, system: sysPrompt,
+        messages: [{ role: "user", content: userMsg + "\n\nOutput the FIRST HALF of the complete modified code. End with: # === PART 2 CONTINUES ===" }]
+      });
+      const p1 = ((r1.content[0] || {}).text || "").replace(/```[\w]*\n?|```/g, "").trim();
+      await ctx.reply("⚙️ [2/2] 生成后半部分...");
+      await ctx.sendChatAction("typing");
+      const r2 = await anthropic.messages.create({
+        model: MAIN_MODEL, max_tokens: 8192, system: sysPrompt,
+        messages: [
+          { role: "user", content: userMsg },
+          { role: "assistant", content: p1 },
+          { role: "user", content: "Continue with the SECOND HALF. Start from where you left off. Code only." }
+        ]
+      });
+      const p2 = ((r2.content[0] || {}).text || "").replace(/```[\w]*\n?|```/g, "").trim();
+      const fullCode = p1 + "\n\n" + p2;
+      const buf = Buffer.from(fullCode, "utf-8");
+      const ts = new Date().toISOString().slice(11,16).replace(":","");
+      const ext = (fileName.match(/\.(py|js|ts|cjs)$/) || ["",".py"])[1];
+      const outName = fileName.replace(/\.[^.]+$/, "") + "_fixed_" + ts + ext;
+      await withRetry(function() {
+        return ctx.replyWithDocument({ source: buf, filename: outName }, { caption: "✅ 修改完成！（" + fullCode.length + " 字符）\n\n用 /save [版本名] 保存" });
+      });
+      pendingFix.delete(userId);
+    } catch (err) {
+      console.error("Fix error:", err.message);
+      await ctx.reply("修改失败: " + err.message).catch(function(){});
+      pendingFix.delete(userId);
+    }
+  });
+}
 
 // ── 决策学习系统 ────────────────────────────────────────────────────────────────
 async function recordDecision(userId, bountyInfo, decision) {
@@ -1352,6 +1552,22 @@ bot.on("text", async function(ctx) {
     }
   }
 
+  // Auto-detect pasted code/logs → switch to fix mode (saves tokens)
+  // Only auto-fix actual code (not logs) - logs have timestamps, code has syntax
+  const hasTimestamps = /\d{4}-\d{2}-\d{2}|\[info\]|\[error\]|\d{2}:\d{2}:\d{2}/.test(userMessage);
+  const looksLikeCode = !hasTimestamps && userMessage.length > 300 && (
+    (userMessage.includes("def ") && userMessage.includes(":")) ||
+    (userMessage.includes("import ") && userMessage.includes("\n")) ||
+    userMessage.includes("SyntaxError") || userMessage.includes("TypeError") ||
+    userMessage.includes("IndentationError") ||
+    (userMessage.includes("function ") && userMessage.includes("{"))
+  );
+  if (looksLikeCode && !userMessage.startsWith("/")) {
+    const ts = new Date().toISOString().slice(11,16).replace(":","");
+    await ctx.reply("🔍 检测到代码，自动进入修复模式（省 token）...");
+    return await autoAnalyzeAndFix(ctx, userId, "paste_" + ts + ".py", userMessage);
+  }
+
   // Handle /fix flow - user typing instructions after /fix with no args
   const fixReply = pendingFix.get(userId);
   if (fixReply && !fixReply.waiting && fixReply.instructions === null && !userMessage.startsWith("/")) {
@@ -1547,7 +1763,9 @@ bot.on("text", async function(ctx) {
       const result = await withLock(userId, async function() {
         return await askClaude(userId, processedMessage, ctx);
       });
-      if (result) {
+      // result is null if 2-pass already sent file, or if streaming handled display
+      // Only call sendLongMessage for non-streaming results (fallback path)
+      if (result && !result.__streamedAlready) {
         await sendLongMessage(ctx, result);
       }
     } catch (err) {
@@ -1558,10 +1776,58 @@ bot.on("text", async function(ctx) {
 });
 
 // ── 处理图片 ──────────────────────────────────────────────────────────────────
+// Cache for photo media groups
+const photoGroupCache = new Map();
+
+
+async function processMultiplePhotos(ctx, userId, photos, caption) {
+  await ctx.sendChatAction("typing");
+  const instruction = caption || "分析这些图片，给我综合对比和关键信息。";
+  try {
+    const contents = [];
+    for (const photo of photos) {
+      const fileLink = await withRetry(function() { return ctx.telegram.getFileLink(photo.file_id); });
+      const res = await fetch(fileLink.href);
+      const buf = await res.arrayBuffer();
+      const b64 = Buffer.from(buf).toString("base64");
+      contents.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } });
+    }
+    contents.push({ type: "text", text: instruction });
+    const systemPrompt = await buildSystemPrompt(userId, instruction);
+    const result = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 4096, system: systemPrompt,
+      messages: [{ role: "user", content: contents }]
+    });
+    const reply = (result.content[0] || {}).text || "无法分析图片。";
+    await saveMessage(userId, "user", "[" + photos.length + " 张图片] " + instruction);
+    await saveMessage(userId, "assistant", reply);
+    await sendLongMessage(ctx, reply);
+  } catch (err) {
+    console.error("Multi photo error:", err.message);
+    await ctx.reply("图片处理失败: " + err.message).catch(function(){});
+  }
+}
+
 bot.on("photo", async function(ctx) {
-  // Skip photos that are part of a media group (multiple photos sent at once)
-  if (ctx.message.media_group_id) return;
   const userId = ctx.from.id;
+  const mediaGroupId = ctx.message.media_group_id;
+
+  if (mediaGroupId) {
+    // Collect all photos in group, then process together
+    if (!photoGroupCache.has(mediaGroupId)) {
+      photoGroupCache.set(mediaGroupId, { photos: [], caption: ctx.message.caption || "", userId, ctx });
+      setTimeout(async function() {
+        const group = photoGroupCache.get(mediaGroupId);
+        photoGroupCache.delete(mediaGroupId);
+        if (!group || group.photos.length === 0) return;
+        await processMultiplePhotos(group.ctx, group.userId, group.photos, group.caption);
+      }, 1500);
+    }
+    // Always take the largest version of each photo
+    const largestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
+    photoGroupCache.get(mediaGroupId).photos.push(largestPhoto);
+    return;
+  }
   await ctx.sendChatAction("typing");
   try {
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
@@ -1721,13 +1987,13 @@ bot.on("document", async function(ctx) {
           return await processFileFix(ctx, userId, fileName, text, fixTask.instructions);
         }
         const caption = ctx.message.caption || "";
-        // Check if user sent a file with caption as fix instruction
-        if (caption && caption.length > 5 && (caption.includes("修") || caption.includes("fix") || caption.includes("改") || caption.includes("加"))) {
-          return await processFileFix(ctx, userId, fileName, text, caption);
-        }
-        // Auto-analyze .py files and provide suggestions + fixed version
-        if (fileName.endsWith(".py") && !caption) {
-          return await autoAnalyzeAndFix(ctx, userId, fileName, text);
+        // .py with caption = auto fix; .py without caption = auto analyze
+        if (fileName.endsWith(".py") || fileName.endsWith(".js") || fileName.endsWith(".ts") || fileName.endsWith(".cjs")) {
+          if (caption && caption.length > 3) {
+            return await processFileFix(ctx, userId, fileName, text, caption);
+          } else {
+            return await autoAnalyzeAndFix(ctx, userId, fileName, text);
+          }
         }
         const fileInstruction = caption || "分析这个文件，找出关键信息、错误或问题。";
 
@@ -1825,14 +2091,13 @@ bot.telegram.setMyCommands([
   { command: "vibestop", description: "⏹ 退出 Vibe 模式" },
   { command: "deploy", description: "🚀 自动部署到 Railway" },
   { command: "weekly", description: "📊 本周活动总结" },
+  { command: "stats", description: "📊 Token 使用统计和费用" },
   { command: "pipeline", description: "🤖 手动触发赏金扫描" },
   { command: "pipelinestatus", description: "📡 查看 Pipeline 状态" },
   { command: "forget", description: "🗑 清除对话历史" },
   { command: "reset", description: "⚠️ 清除所有内容" },
   { command: "help", description: "❓ 查看所有命令" }
 ]).catch(console.error);
-
-launch().catch(console.error);
 
 // PDF 文件处理
 bot.on(["message"], async function(ctx) {
@@ -2323,6 +2588,51 @@ async function runBountyPipeline(bot) {
 }
 
 // Manual trigger command
+
+bot.command("stats", async function(ctx) {
+  const userId = ctx.from.id;
+  let usage = tokenUsage.get(userId) || { input: 0, output: 0, calls: 0 };
+  // Load from Supabase for persistent totals
+  if (supabase) {
+    try {
+      const { data } = await supabase.from("conversations")
+        .select("content").eq("user_id", parseInt(userId)).eq("role", "stats")
+        .order("created_at", { ascending: false }).limit(500);
+      if (data && data.length > 0) {
+        const totals = data.reduce(function(acc, row) {
+          try {
+            const d = JSON.parse(row.content);
+            acc.input += d.input || 0;
+            acc.output += d.output || 0;
+            acc.calls += 1;
+          } catch(e) {}
+          return acc;
+        }, { input: 0, output: 0, calls: 0 });
+        usage = totals;
+      }
+    } catch(e) {}
+  }
+  const cost = estimateCost(usage.input, usage.output);
+  const avgInput = usage.calls > 0 ? Math.round(usage.input / usage.calls) : 0;
+  const avgOutput = usage.calls > 0 ? Math.round(usage.output / usage.calls) : 0;
+
+  await ctx.reply(
+    "📊 Token 使用统计（本次运行）\n\n" +
+    "💬 对话次数：" + usage.calls + " 次\n" +
+    "📥 输入 tokens：" + usage.input.toLocaleString() + "\n" +
+    "📤 输出 tokens：" + usage.output.toLocaleString() + "\n" +
+    "💰 估算费用：$" + cost + "\n\n" +
+    "📈 平均每次\n" +
+    "  输入：" + avgInput + " tokens\n" +
+    "  输出：" + avgOutput + " tokens\n\n" +
+    (autoOptimize(userId) ? "⚠️ 自动建议\n• " + autoOptimize(userId).join("\n• ") + "\n\n" : "") +
+    "💡 省钱建议\n" +
+    "• 保持 soul/projects 精简\n" +
+    "• 用 /fix 而非重新生成\n" +
+    "• 定期 /forget 清历史"
+  );
+});
+
 bot.command("pipeline", async function(ctx) {
   const userId = ctx.from.id;
   if (!PIPELINE_ENABLED) {
@@ -2355,3 +2665,4 @@ setTimeout(function() {
   }
 }, 60000); // wait 60s after startup to avoid 429
 
+launch().catch(console.error);
