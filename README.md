@@ -1,16 +1,16 @@
-# Claude 大神 Telegram Bot
+# 🤖 Claude 大神 Bot
 
-A personal AI assistant powered by Claude, running on Telegram. Features a 4-layer memory system, auto-learning, web search and image recognition. Gets smarter the more you use it — memory persists across restarts.
+A personal AI assistant powered by Claude, running on Telegram. Features a 4-layer memory system, bounty automation, code tools, web search and image recognition. Gets smarter the more you use it — memory persists across restarts.
 
-Built by [@0xKingsKuan](https://x.com/0xKingsKuan)
+一个接入 Claude AI 的 Telegram 私人助理。带四层记忆系统、赏金自动化、代码工具、网络搜索和图片识别。越用越聪明，重启不丢失记忆。
 
-一个接入 Claude AI 的 Telegram 私人助理。带四层记忆系统、自动学习、网络搜索和图片识别。越用越聪明，重启不丢失记忆。
+Built by [@0xKingsKuan](https://twitter.com/0xKingsKuan)
 
 -----
 
 ## One-Click Deploy / 一键部署
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.com/deploy/hi0iqD?referralCode=ztkI8u)
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template)
 
 Click the button → Fill in your variables → Done 🚀
 
@@ -20,292 +20,124 @@ Click the button → Fill in your variables → Done 🚀
 
 ## Features / 功能
 
-- **Smart Conversation** — Fully powered by Claude AI, answers anything
-- **Auto-Learning Memory** — Updates your memory profile after every chat, learns your preferences over time
-- **4-Layer Memory System:**
-  - `soul.md` — Who you are (permanent)
-  - `projects.md` — Your projects (permanent)
-  - `tasks.md` — Current tasks (auto-updated)
-  - `notes.md` — Important notes (auto-updated)
-  - Vector memory — Semantic search over past conversations
-  - Conversation summaries — Auto-compresses long chats
-- **Smart Web Search** — Claude decides when to search, skips short messages automatically
-- **Image Recognition** — Send any image for instant analysis
-- **PDF Support** — Send a PDF and get a summary or targeted analysis
-- **File Analysis** — `.log` `.txt` `.csv` `.json` `.py` and more
-- **Web Summarization** — Send any URL to get an instant summary
-- **GitHub Raw Auto-Convert** — Paste a GitHub file link, Bot fetches the raw code
-- **Decision Learning** — Say “do” or “skip” on bounties, Bot learns your preferences automatically
-- **Streaming Replies** — Text appears as it’s generated, just like ChatGPT
-- **Long Code as File** — Code that’s too long is sent as a downloadable file
-- **Multilingual** — Replies in whatever language you write in
-- **24/7 Cloud** — Always on, never sleeps
+- **Smart Conversation** — Fully powered by Claude Opus, answers anything
+- **Auto-Learning Memory** — 4-layer system: soul / projects / tasks / notes
+- **Bounty Pipeline** — Auto-scans 6 platforms nightly, scores & executes bounties
+- **Vibe Coding** — Send a bounty link → Claude builds the project → pushes to GitHub
+- **Code Tools** — Fix, explain, review, test, version control
+- **Image Generation** — `/imagine` powered by Gemini 2.5 Flash
+- **File Analysis** — PDF, ZIP, DOCX, XLSX, images, code files, logs
+- **Mixed File Upload** — Send photos + files together, analyzed as one
+- **Crypto Prices** — `/price BTC` real-time via CoinGecko
+- **Reminders** — `/remind 30m` timed alerts
+- **Web Search** — Auto-searches when needed via Tavily
+- **Daily Briefing** — BTC/ETH/SOL prices every morning at 7 AM
+
+智能对话 · 自动记忆 · 赏金自动化 · Vibe 建项目 · 代码工具 · 图片生成 · 文件分析 · 混发支持 · 加密价格 · 定时提醒 · 网络搜索 · 每日简报
 
 -----
 
-- **智能对话** — Claude AI 驱动，回答任何问题
-- **自动学习记忆** — 每次对话后自动更新记忆档案，越用越了解你
-- **四层记忆架构** — soul / projects / tasks / notes + 向量记忆 + 对话摘要
-- **智能网络搜索** — 自动判断是否需要搜索，短消息直接跳过
-- **图片识别** — 发图片直接分析
-- **PDF 支持** — 发 PDF 直接总结分析
-- **文件分析** — .log .txt .csv .json .py 等格式
-- **网页总结** — 发链接直接总结内容
-- **GitHub 自动转换** — blob 链接自动转 raw，直接抓取代码
-- **决策学习** — 对赏金说”做”或”跳过”，Bot 自动记住偏好，推荐越来越准
-- **Streaming 回复** — 字一个个打出来，不用等
-- **长代码发文件** — 超长代码自动发 .txt 文件
-- **多语言** — 你说什么语言它就回什么语言
+## Commands / 命令
+
+### 💬 Conversation / 对话
+
+|Command                   |Description                    |
+|--------------------------|-------------------------------|
+|`/translate [lang] [text]`|Translate to any language / 翻译 |
+|`/improve [text]`         |Polish & rewrite / 润色改写        |
+|`/brainstorm [topic]`     |Structured brainstorming / 头脑风暴|
+|`/summarize`              |Compress conversation / 压缩对话   |
+|`/export`                 |Export chat history / 导出记录     |
+
+### 💰 Crypto & Bounties / 加密与赏金
+
+|Command               |Description                              |
+|----------------------|-----------------------------------------|
+|`/price [coin]`       |Real-time price / 实时价格                   |
+|`/vibe`               |Build project + push GitHub / 建项目推 GitHub|
+|`/deploy [GitHub URL]`|Deploy to Railway / 部署到 Railway          |
+|`/pipeline`           |Manual bounty scan / 手动扫描赏金              |
+|`/pipelinestatus`     |Pipeline status / Pipeline 状态            |
+
+### 💻 Code / 代码
+
+|Command       |Description               |
+|--------------|--------------------------|
+|`/fix`        |Modify code file / 修改代码文件 |
+|`/explain`    |Explain code logic / 解释代码 |
+|`/review`     |Code review + score / 审查评分|
+|`/test`       |Generate test cases / 生成测试|
+|`/save [name]`|Save version / 保存版本       |
+|`/versions`   |List versions / 查看版本      |
+|`/load [name]`|Load version / 加载版本       |
+
+### 🎨 Creation / 创作
+
+|Command          |Description                  |
+|-----------------|-----------------------------|
+|`/imagine [desc]`|AI image generation / AI 图片生成|
+|`/weekly`        |Weekly summary / 本周总结        |
+
+### 🧠 Memory / 记忆
+
+|Command                     |Description                |
+|----------------------------|---------------------------|
+|`/memory`                   |Full memory overview / 记忆总览|
+|`/soul` / `/setsoul`        |Personal profile / 个人档案    |
+|`/projects` / `/setprojects`|Projects / 项目              |
+|`/tasks` / `/settasks`      |Tasks / 任务                 |
+|`/notes` / `/note [text]`   |Notes / 笔记                 |
+
+### ⚙️ Utilities / 工具
+
+|Command                     |Description                  |
+|----------------------------|-----------------------------|
+|`/remind [30m/2h/1d] [text]`|Timed reminder / 定时提醒        |
+|`/template save/use/list`   |Prompt templates / 模板管理      |
+|`/stats`                    |Token usage & cost / Token 统计|
+|`/help`                     |Full command list / 完整命令     |
+|`/forget` / `/reset`        |Clear history / 清除记录         |
 
 -----
 
-## What You Need / 需要准备
+## Environment Variables / 环境变量
 
-|Service              |Purpose            |Cost             |
-|---------------------|-------------------|-----------------|
-|Telegram @BotFather  |Bot Token          |Free             |
-|console.anthropic.com|Claude API Key     |Pay as you go    |
-|supabase.com         |Database for memory|Free             |
-|tavily.com           |Web search         |Free (1000/month)|
-|voyageai.com         |Vector memory      |Free             |
+```env
+BOT_TOKEN=
+ANTHROPIC_API_KEY=
+WEBHOOK_URL=https://your-app.up.railway.app
+SUPABASE_URL=
+SUPABASE_KEY=                # service_role key, disable RLS
+TAVILY_API_KEY=
+VOYAGE_API_KEY=
+GITHUB_TOKEN=
+RAILWAY_API_TOKEN=
+GEMINI_API_KEY=
 
------
-
-## Quick Deploy / 快速部署
-
-### Step 1 — Get Your API Keys / 第一步 — 获取 API Keys
-
-**Telegram Bot Token**
-
-1. Search @BotFather → /newbot
-1. Choose a name and username (username must end in `bot`)
-1. Copy the token
-
-**Anthropic API Key**
-
-1. console.anthropic.com → API Keys → Create Key
-
-**Supabase**
-
-1. Sign up at supabase.com, create a new project
-1. SQL Editor → New query → paste the following → Run:
-
-```sql
-create extension if not exists vector;
-
-create table if not exists conversations (
-  id serial primary key,
-  user_id bigint not null,
-  role text not null,
-  content text not null,
-  created_at timestamp default now()
-);
-
-create table if not exists user_docs (
-  id serial primary key,
-  user_id bigint not null,
-  doc_type text not null,
-  content text not null,
-  updated_at timestamp default now(),
-  unique(user_id, doc_type)
-);
-
-create table if not exists conversation_summaries (
-  id serial primary key,
-  user_id bigint not null,
-  summary text not null,
-  message_count int default 0,
-  created_at timestamp default now()
-);
-
-create table if not exists memories (
-  id serial primary key,
-  user_id bigint not null,
-  content text not null,
-  memory_type text default 'general',
-  embedding vector(1024),
-  created_at timestamp default now()
-);
-```
-
-1. Settings → API → Copy:
-- Project URL → `SUPABASE_URL`
-- `service_role` key (important: NOT the anon key) → `SUPABASE_KEY`
-1. **Disable RLS** on all 4 tables: Table Editor → each table → RLS → Disable
-
-**Tavily (optional — web search)**
-
-1. tavily.com → Sign up → Copy API Key
-
-**Voyage (optional — vector memory)**
-
-1. voyageai.com → Sign up → Copy API Key
-
------
-
-### Step 2 — Deploy / 第二步 — 部署
-
-Click the Deploy on Railway button above and fill in these variables:
-
-|Variable         |Description                                        |Required                    |
-|-----------------|---------------------------------------------------|----------------------------|
-|BOT_TOKEN        |Telegram Bot Token                                 |✅ Required                  |
-|ANTHROPIC_API_KEY|Anthropic API Key                                  |✅ Required                  |
-|SUPABASE_URL     |Supabase Project URL                               |Strongly recommended        |
-|SUPABASE_KEY     |Supabase **service_role** key                      |Strongly recommended        |
-|TAVILY_API_KEY   |Tavily API Key                                     |Optional                    |
-|VOYAGE_API_KEY   |Voyage API Key                                     |Optional                    |
-|GITHUB_TOKEN     |GitHub Personal Access Token                       |For /vibe                   |
-|RAILWAY_API_TOKEN|Railway API Token (Account Settings → Tokens)      |For /deploy                 |
-|PIPELINE_ENABLED |Set to `true` to enable bounty pipeline            |Optional                    |
-|PIPELINE_OWNER_ID|Your Telegram user ID (get it from /pipelinestatus)|Required if pipeline enabled|
-
-⚠️ `SUPABASE_KEY` must be the `service_role` key, not the `anon` public key.
-
------
-
-### Step 3 — Set Webhook / 第三步 — 设置 Webhook
-
-After deployment:
-
-1. Railway → Settings → Networking → Generate Domain
-1. Copy the URL (e.g. `https://xxx.railway.app`)
-1. Railway → Variables → Add `WEBHOOK_URL = your URL` (no trailing slash)
-1. Railway redeploys automatically
-
------
-
-### Step 4 — Start Using / 第四步 — 开始使用
-
-Search your Bot → Send `/start`
-
-Recommended first steps:
-
-```
-/setsoul Your name and background
-/setprojects Your current projects
-/settasks Your most important tasks right now
 ```
 
 -----
 
-## Commands / 命令列表
+## Tech Stack / 技术栈
 
-**Memory / 记忆**
-
-- `/memory` — Full memory overview
-- `/soul` — View soul.md
-- `/projects` — View projects
-- `/tasks` — View tasks
-- `/notes` — View notes
-- `/summaries` — View conversation summaries
-
-**Update Memory / 更新记忆**
-
-- `/setsoul [content]`
-- `/setprojects [content]`
-- `/settasks [content]`
-- `/note [content]` — Add a note
-- `/clearnotes` — Clear all notes
-- `/summarize` — Force compress conversation
-
-**Build & Deploy / 构建和部署**
-
-- `/vibe` — Start AI-assisted project builder (generates code + pushes to GitHub)
-- `/vibestop` — Exit Vibe Coding mode
-- `/deploy [GitHub link]` — Auto-deploy to Railway (can include env vars)
-- `/code [description]` — Generate a complete code file in any language (2-pass, no truncation)
-- `/codestop` — Exit Code mode
-- `/fix [instructions]` — Modify an existing code file (send instructions then upload file)
-- `/save [version]` — Save the last generated code as a named version
-- `/versions` — List all saved code versions
-- `/load [version]` — Retrieve a saved code version
+|             |                      |
+|-------------|----------------------|
+|Bot          |Telegraf (Node.js)    |
+|AI Main      |Claude Opus           |
+|AI Fast      |Claude Haiku          |
+|Image Gen    |Gemini 2.5 Flash Image|
+|Database     |Supabase              |
+|Search       |Tavily                |
+|Vector Memory|Voyage AI             |
+|Deploy       |Railway               |
 
 -----
 
-- `/vibe` — 启动 AI 辅助建项目（生成代码 + 推送 GitHub）
-- `/vibestop` — 退出 Vibe Coding 模式
-- `/deploy [GitHub链接]` — 自动部署到 Railway
-- `/code [描述]` — 生成完整代码文件（任何语言，两段合并不截断）
-- `/codestop` — 退出 Code 模式
-- `/fix [说明]` — 修改现有代码文件（先说要改什么，再发文件）
-- `/save [版本名]` — 保存最近生成的代码
-- `/versions` — 查看所有保存的版本
-- `/load [版本名]` — 加载已保存的代码版本
+## Supabase Setup
 
-**Analytics / 分析**
-
-- `/weekly` — This week’s activity summary and bounty decision log
-
-**Management / 管理**
-
-- `/forget` — Clear conversation history (keeps memory profiles)
-- `/reset` — Clear everything
-- `/help` — All commands
+Disable RLS on all tables. Run `supabase_setup.sql` to create:
+`conversations` · `user_docs` · `conversation_summaries` · `memories` (vector 1024)
 
 -----
 
-## Memory System / 记忆系统
-
-The Bot has 4 layers of memory, all automatic:
-
-1. `soul.md` + `projects.md` — Permanent identity layer
-1. `tasks.md` + `notes.md` — Dynamic knowledge, auto-updated
-1. Vector memory — Semantic search, pulls only the most relevant memories
-1. Conversation summaries — Auto-compressed every 20 messages
-
-After every conversation, the Bot analyzes and extracts important info into your profile. The more you use it, the smarter it gets.
-
------
-
-四层记忆，全部自动运作：
-
-1. soul.md + projects.md（永久身份）
-1. tasks.md + notes.md（动态知识，自动更新）
-1. 向量记忆（语义搜索，只调取最相关的记忆）
-1. 对话摘要（每 20 条自动压缩）
-
-每次对话后自动分析，提取重要信息写入档案。越用越聪明，越用越了解你。
-
------
-
-## Troubleshooting / 常见问题
-
-**Bot not responding** — Check BOT_TOKEN, ANTHROPIC_API_KEY, WEBHOOK_URL are all set
-
-**Bot 没反应** — 检查 BOT_TOKEN、ANTHROPIC_API_KEY、WEBHOOK_URL 是否都填了
-
-**“Something went wrong”** — Check ANTHROPIC_API_KEY is correct and account has credits
-
-**Memory shows “Not set yet”** — SUPABASE_KEY must be service_role key, not anon key. Also check RLS is disabled on all tables.
-
-**记忆显示 Not set yet** — SUPABASE_KEY 必须用 service_role key，同时确认四张表的 RLS 已关闭
-
-**Search not working** — Confirm TAVILY_API_KEY is correct
-
-**Deploy failed** — Make sure there’s no extra `index.js` in the repo
-
------
-
-## File Structure / 文件结构
-
-```
-Claudebot-vibe/
-├── bot.cjs          Main program / 主程序
-├── package.json     Dependencies / 依赖配置
-├── railway.json     Railway config / 部署配置
-├── .gitignore       Ignore sensitive files / 忽略敏感文件
-└── README.md        This file / 说明文档
-```
-
------
-
-## License
-
-MIT — Use, modify, and share freely.
-
-MIT — 随意使用、修改、分享。
-
-如果这个项目对你有帮助，欢迎 Star ⭐ 和 Fork！
-
-If this helped you, a Star ⭐ and Fork are appreciated!
+*Claude 大神 v10.0 — Built with ❤️ by [@0xKingsKuan](https://twitter.com/0xKingsKuan)
