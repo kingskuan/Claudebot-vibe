@@ -10,7 +10,10 @@
     "@anthropic-ai/sdk": "^0.30.0",
     "@supabase/supabase-js": "^2.39.0",
     "express": "^4.19.0",
-    "telegraf": "^4.16.3"
+    "telegraf": "^4.16.3",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.7.0",
+    "xlsx": "^0.18.5"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -965,6 +965,7 @@ async function withRetry(fn, retries, delayMs) {
 
 // ── Vibe Coding ───────────────────────────────────────────────────────────────
 const vibeSessions = new Map();
+const pendingBountyAction = new Map();
 
 async function getGitHubUser() {
   const res = await fetch("https://api.github.com/user", {
@@ -987,105 +988,93 @@ async function createGitHubRepo(repoName, description) {
 async function pushFilesToGitHub(owner, repoName, files) {
   const headers = { "Authorization": "token " + GITHUB_TOKEN, "Content-Type": "application/json", "User-Agent": "ClaudeBot" };
   const base = "https://api.github.com/repos/" + owner + "/" + repoName;
-  let treeSha, commitSha;
 
-  const branchRes = await fetch(base + "/git/ref/heads/main", { headers });
-  if (branchRes.ok) {
-    const bd = await branchRes.json();
-    commitSha = bd.object.sha;
-    const cd = await (await fetch(base + "/git/commits/" + commitSha, { headers })).json();
-    treeSha = cd.tree.sha;
-  }
-
-  const treeItems = [];
+  // Use Contents API - works on both empty and non-empty repos
   for (const [path, fileContent] of Object.entries(files)) {
-    const blob = await (await fetch(base + "/git/blobs", {
-      method: "POST", headers,
-      body: JSON.stringify({ content: fileContent, encoding: "utf-8" })
-    })).json();
-    treeItems.push({ path, mode: "100644", type: "blob", sha: blob.sha });
-  }
-
-  const treeBody = { tree: treeItems };
-  if (treeSha) treeBody.base_tree = treeSha;
-  const tree = await (await fetch(base + "/git/trees", { method: "POST", headers, body: JSON.stringify(treeBody) })).json();
-
-  const commitBody = { message: "Initial commit by Claude Bot", tree: tree.sha };
-  if (commitSha) commitBody.parents = [commitSha];
-  const newCommit = await (await fetch(base + "/git/commits", { method: "POST", headers, body: JSON.stringify(commitBody) })).json();
-
-  if (branchRes.ok) {
-    await fetch(base + "/git/refs/heads/main", { method: "PATCH", headers, body: JSON.stringify({ sha: newCommit.sha, force: true }) });
-  } else {
-    await fetch(base + "/git/refs", { method: "POST", headers, body: JSON.stringify({ ref: "refs/heads/main", sha: newCommit.sha }) });
+    if (!fileContent || fileContent.length === 0) continue;
+    try {
+      // Check if file exists (for updates)
+      const existRes = await fetch(base + "/contents/" + path, { headers });
+      const body = {
+        message: "Add " + path + " by Claude Bot",
+        content: Buffer.from(fileContent).toString("base64")
+      };
+      if (existRes.ok) {
+        const existData = await existRes.json();
+        body.sha = existData.sha; // needed for updates
+      }
+      const res = await fetch(base + "/contents/" + path, {
+        method: "PUT", headers,
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        console.error("Failed to push", path, res.status, JSON.stringify(data).substring(0,150));
+      } else {
+        console.log("Pushed:", path, "(" + fileContent.length + " chars)");
+      }
+    } catch (e) {
+      console.error("Error pushing", path, e.message);
+    }
   }
   return "https://github.com/" + owner + "/" + repoName;
 }
 
 async function generateProjectFiles(idea, techStack, details) {
-  // Strategy: generate files one by one, no JSON format (avoids truncation issues)
   const isPython = techStack.toLowerCase().includes("python");
-  const mainFile = isPython ? "main.py" : (techStack.toLowerCase().includes("node") ? "index.js" : "main.py");
-  const depFile = isPython ? "requirements.txt" : "package.json";
+  const isSolana = techStack.toLowerCase().includes("solana") || techStack.toLowerCase().includes("rust");
+  const mainFile = isPython ? "main.py" : (isSolana ? "program.rs" : "index.js");
+  const depFile = isPython ? "requirements.txt" : (isSolana ? "Cargo.toml" : "package.json");
 
   const files = {};
+  const sysPrompt = "You are an expert developer building for a hackathon. Write complete, production-ready, WORKING code that directly addresses the hackathon requirements. No placeholders, no TODOs. Real implementation only.";
 
-  // Generate main file - 2 pass for completeness
-  const sysPrompt = "You are an expert developer. Write complete, production-ready code. No placeholders, no TODOs. Always write the full implementation.";
-  
-  const res1 = await anthropic.messages.create({
+  const context = details && details.length > 100
+    ? "\n\nHackathon/Bounty Requirements (use this to guide the implementation):\n" + details.substring(0, 4000)
+    : "";
+
+  // Pass 1
+  const r1 = await anthropic.messages.create({
     model: MAIN_MODEL, max_tokens: 8192, system: sysPrompt,
-    messages: [{ role: "user", content: "Write the FIRST HALF of " + mainFile + " for: " + idea + "\nTech: " + techStack + "\nDetails: " + (details || "none") + "\n\nOutput ONLY the code, no markdown. End with: # === PART 2 CONTINUES ===" }]
+    messages: [{ role: "user", content: "Build: " + idea + "\nTech: " + techStack + context + "\n\nWrite the FIRST HALF of " + mainFile + ". Focus on: imports, config, core data structures, main classes/functions. End with: # === PART 2 CONTINUES ===" }]
   });
-  const part1 = ((res1.content[0] || {}).text || "").replace(/```[\w]*\n?|```/g, "").trim();
+  const part1 = ((r1.content[0] || {}).text || "").replace(/```[\w]*\n?|```/g, "").trim();
 
-  const res2 = await anthropic.messages.create({
+  // Pass 2
+  const r2 = await anthropic.messages.create({
     model: MAIN_MODEL, max_tokens: 8192, system: sysPrompt,
     messages: [
-      { role: "user", content: "Write " + mainFile + " for: " + idea },
+      { role: "user", content: "Build: " + idea + "\nTech: " + techStack + context },
       { role: "assistant", content: part1 },
-      { role: "user", content: "Continue writing the SECOND HALF. Include main loop, error handling, entry point. Output ONLY code." }
+      { role: "user", content: "Continue with SECOND HALF: business logic, API endpoints, main loop, error handling, entry point. Output ONLY code." }
     ]
   });
-  const part2 = ((res2.content[0] || {}).text || "").replace(/```[\w]*\n?|```/g, "").trim();
+  const part2 = ((r2.content[0] || {}).text || "").replace(/```[\w]*\n?|```/g, "").trim();
   files[mainFile] = part1 + "\n\n" + part2;
 
-  // Generate dependencies file
+  // Dependencies
   const depRes = await anthropic.messages.create({
-    model: FAST_MODEL, max_tokens: 500,
-    messages: [{ role: "user", content: "List only the pip packages needed for this code (one per line, no versions needed):\n" + part1.substring(0, 2000) + "\n\nOutput ONLY package names, one per line." }]
+    model: FAST_MODEL, max_tokens: 300,
+    messages: [{ role: "user", content: isPython ? "List pip packages needed (one per line):\n" + part1.substring(0, 1000) : "Write package.json dependencies for:\n" + idea + "\nTech: " + techStack + "\n\nReturn ONLY valid package.json JSON." }]
   });
-  files[depFile] = ((depRes.content[0] || {}).text || "").trim();
+  files[depFile] = ((depRes.content[0] || {}).text || "").replace(/```[\w]*\n?|```/g, "").trim();
 
-  // Simple README
-  files["README.md"] = "# " + idea + "\n\nTech: " + techStack + "\n\nGenerated by Claude 大神";
-  files[".gitignore"] = isPython ? "__pycache__/\n*.pyc\n.env\nvenv/" : "node_modules/\n.env";
+  // README with actual project description
+  const readmeRes = await anthropic.messages.create({
+    model: FAST_MODEL, max_tokens: 500,
+    messages: [{ role: "user", content: "Write a README.md for this hackathon project:\nProject: " + idea + "\nTech: " + techStack + "\n\nInclude: title, description, features, setup instructions, usage. Keep it concise but professional." }]
+  });
+  files["README.md"] = ((readmeRes.content[0] || {}).text || "# " + idea).replace(/```[\w]*\n?|```/g, "").trim();
+  files[".gitignore"] = isPython ? "__pycache__/\n*.pyc\n.env\nvenv/\n*.log" : "node_modules/\n.env\n*.log\ndist/";
+  if (!isPython && !isSolana) files[".env.example"] = "# Environment variables\n# PORT=3000\n# API_KEY=your_key_here";
 
   return files;
 }
 
 async function reviewAndFixFiles(files, idea, techStack) {
-  const filesSummary = Object.entries(files).map(function(entry) {
-    const path = entry[0];
-    const code = entry[1];
-    return "=== " + path + " ===\n" + code.substring(0, 4000) + (code.length > 4000 ? "\n...[truncated]" : "");
-  }).join("\n\n");
-
-  const reviewPrompt = "You are a senior developer reviewing code before deployment.\n\nProject idea: " + idea + "\nTech stack: " + techStack + "\n\nGenerated files:\n" + filesSummary + "\n\nReview the code and fix any issues:\n1. Syntax errors or typos\n2. Missing imports or dependencies\n3. Broken logic or incomplete functions\n4. Security issues (hardcoded secrets, etc)\n5. Missing error handling\n\nReturn ONLY a JSON object with the fixed files (same structure: filepath -> content). If a file is fine, include it unchanged. Return ONLY valid JSON, no explanation.";
-
-  const res = await anthropic.messages.create({
-    model: MAIN_MODEL,
-    max_tokens: 8192,
-    messages: [{ role: "user", content: reviewPrompt }]
-  });
-  const text = (res.content[0] || {}).text || "{}";
-  const clean = text.replace(/^```json\n?|^```\n?|```$/gm, "").trim();
-  try {
-    return JSON.parse(clean);
-  } catch (e) {
-    console.error("Review parse error:", e.message);
-    return files; // return original if review fails
-  }
+  // Skip JSON round-trip review (causes empty files) - return files directly
+  // Files are already generated with 2-pass, no need to re-parse
+  return files;
 }
 
 bot.command("vibe", async function(ctx) {
@@ -1505,7 +1494,7 @@ bot.command("imagine", async function(ctx) {
 
   setImmediate(async function() {
     try {
-      const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=" + GEMINI_API_KEY, {
+      const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=" + GEMINI_API_KEY, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1601,19 +1590,211 @@ bot.on("text", async function(ctx) {
 
 
   // Handle vibe coding session
+  // Handle pending bounty action confirmation
+  if (pendingBountyAction.has(userId) && !userMessage.startsWith("/")) {
+    const action = pendingBountyAction.get(userId);
+    const cancelled = userMessage.includes("取消") || userMessage.toLowerCase().includes("cancel") || userMessage.includes("不需要") || userMessage.includes("跳过");
+    const confirmed = userMessage.includes("确认") || userMessage.toLowerCase().includes("ok") || userMessage.includes("好") || userMessage.includes("是");
+    if (cancelled) {
+      pendingBountyAction.delete(userId);
+      return ctx.reply("好的，跳过此赏金。");
+    }
+    if (confirmed && action.type === "content") {
+      pendingBountyAction.delete(userId);
+      await ctx.reply("✍️ 开始生成内容类提交...");
+      setImmediate(async function() {
+        try {
+          const contentRes = await anthropic.messages.create({
+            model: MAIN_MODEL, max_tokens: 4096,
+            messages: [{ role: "user", content: "Write a complete submission for this bounty:\n\nBounty: " + action.bounty.title + "\nDeliverable: " + action.scoring.deliverable + "\nDetails: " + (action.fullDesc || action.bounty.description || "").substring(0, 2000) + "\n\nWrite in a professional, engaging style. Make it submission-ready." }]
+          });
+          const text = (contentRes.content[0] || {}).text || "";
+          const buf = Buffer.from("BOUNTY: " + action.bounty.title + "\nURL: " + action.bounty.url + "\n\n" + text, "utf-8");
+          await withRetry(function() {
+            return ctx.replyWithDocument({ source: buf, filename: "submission.txt" }, { caption: "📄 内容已生成，去这里提交: " + action.bounty.url });
+          });
+        } catch(e) { await ctx.reply("生成失败: " + e.message); }
+      });
+      return;
+    }
+    if (!confirmed && !cancelled) {
+      // Not a clear yes/no - treat as normal chat
+      pendingBountyAction.delete(userId);
+    }
+  }
+
   if (vibeSessions.has(userId) && !userMessage.startsWith("/")) {
     const session = vibeSessions.get(userId);
 
     if (session.step === "idea") {
-      session.idea = userMessage;
+      const ideaText = userMessage;
+      // Check if it's a URL - fetch bounty details automatically
+      const urlMatch = ideaText.match(/https?:\/\/[^\s]+/);
+      if (urlMatch) {
+        session.idea = ideaText;
+        session.url = urlMatch[0];
+        session.step = "building";
+        vibeSessions.set(userId, session);
+        await ctx.reply("🔍 检测到链接，自动抓取赏金详情...");
+        await ctx.sendChatAction("typing");
+
+        // Fetch bounty page content
+        let fetchedContent = "";
+        try {
+          const pageRes = await fetch(session.url, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.5"
+            }
+          });
+          if (pageRes.ok) {
+            const html = await pageRes.text();
+            fetchedContent = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+              .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+              .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").substring(0, 6000);
+          }
+        } catch(e) {
+          console.log("Fetch failed:", e.message);
+        }
+
+        if (!fetchedContent || fetchedContent.trim().length < 200) {
+          // Can't scrape - ask user to paste details
+          session.step = "manual_details";
+          vibeSessions.set(userId, session);
+          return ctx.reply("⚠️ 无法自动抓取该页面内容。\n\n请直接把赏金/黑客松的要求粘贴给我：\n（主题、要求、技术栈要求、评分标准等）");
+        }
+
+        session.bountyDetails = fetchedContent;
+
+        // First: classify content vs dev, then handle accordingly
+        const classifyRes = await anthropic.messages.create({
+          model: FAST_MODEL, max_tokens: 600,
+          messages: [{ role: "user", content: "Analyze this bounty page content and classify it.\n\n" + fetchedContent.substring(0, 3000) + "\n\nReply ONLY with valid JSON:\n{\"type\": \"content|dev|hackathon|audit\", \"title\": \"bounty name\", \"summary\": \"one sentence in Chinese\", \"deliverable\": \"what to submit\", \"stack\": \"recommended tech stack if dev\"}" }]
+        });
+        let classify = { type: "dev", title: session.idea, summary: "", deliverable: "", stack: "Node.js" };
+        try {
+          const raw = (classifyRes.content[0] || {}).text || "{}";
+          classify = JSON.parse(raw.replace(/```json\n?|```/g, "").trim());
+        } catch(e) {}
+
+        if (classify.type === "content") {
+          // Content bounty - auto generate submission
+          vibeSessions.delete(userId);
+          await ctx.reply("✍️ **内容类赏金** — 自动生成提交内容...");
+          await ctx.sendChatAction("typing");
+          setImmediate(async function() {
+            try {
+              const contentRes = await anthropic.messages.create({
+                model: MAIN_MODEL, max_tokens: 4096,
+                messages: [{ role: "user", content: "Write a complete, professional submission for this bounty:\n\nTitle: " + classify.title + "\nDeliverable: " + classify.deliverable + "\nDetails:\n" + fetchedContent.substring(0, 3000) + "\n\nMake it submission-ready, engaging, and specific to the requirements." }]
+              });
+              const text = (contentRes.content[0] || {}).text || "";
+              const buf = Buffer.from("BOUNTY: " + classify.title + "\nURL: " + session.url + "\n\n" + text, "utf-8");
+              await withRetry(function() {
+                return ctx.replyWithDocument({ source: buf, filename: "submission.txt" }, { caption: "📄 内容已生成！去这里提交: " + session.url });
+              });
+            } catch(e) { await ctx.reply("生成失败: " + e.message); }
+          });
+          return;
+        }
+
+        // Dev/hackathon - analyze and ask for confirmation
+        const analyzeRes = await anthropic.messages.create({
+          model: FAST_MODEL, max_tokens: 600,
+          messages: [{ role: "user", content: "Analyze this dev bounty/hackathon and suggest what to build:\n\n" + fetchedContent.substring(0, 3000) + "\n\nReply in Chinese with:\n1. 主题理解\n2. 推荐项目\n3. 技术栈: " + (classify.stack || "Node.js") + "\n4. 核心功能（3-4个）" }]
+        });
+        const analysis = (analyzeRes.content[0] || {}).text || "";
+        await sendLongMessage(ctx, "📋 **" + (classify.type === "hackathon" ? "黑客松" : "开发类") + "赏金分析**\n\n" + analysis);
+        await ctx.reply("✅ 发 **确认** 开始生成项目\n❌ 发 **取消** 跳过\n✏️ 或说说你想做什么");
+        session.stack = classify.stack || "Node.js";
+        session.details = fetchedContent;
+        session.step = "confirm";
+        vibeSessions.set(userId, session);
+        return;
+      }
+
+      session.idea = ideaText;
       session.step = "stack";
       vibeSessions.set(userId, session);
-      return ctx.reply("💡 好的！用什么技术栈？\n\n例如：Node.js, Python, React, Next.js 等\n（不确定就说 '帮我选'）");
+      return ctx.reply("💡 好的！用什么技术栈？\n\n例如：Node.js, Python, React, Solana\n（不确定就说 '帮我选'）");
     }
 
-    if (session.step === "stack") {
+    if (session.step === "manual_details") {
+      // User pasted the bounty requirements manually
+      session.bountyDetails = userMessage;
+      session.details = userMessage;
+      const analyzeRes = await anthropic.messages.create({
+        model: FAST_MODEL, max_tokens: 800,
+        messages: [{ role: "user", content: "Analyze this hackathon/bounty and suggest the best project to build:\n\n" + userMessage + "\n\nReply in Chinese with:\n1. 主题理解（这个赏金要什么）\n2. 推荐项目方向\n3. 推荐技术栈\n4. 核心功能（3-5个）\n\nBe specific and practical." }]
+      });
+      const analysis = (analyzeRes.content[0] || {}).text || "";
+      await sendLongMessage(ctx, "📋 **赏金分析**\n\n" + analysis);
+      await ctx.reply("确认方向？或者说说你想做什么（直接发 '确认' 开始生成）");
+      session.stack = "Node.js";
+      session.step = "confirm";
+      vibeSessions.set(userId, session);
+      return;
+    }
+
+    if (session.step === "confirm") {
+      const cancelled = userMessage.includes("不需要") || userMessage.includes("取消") || userMessage.includes("算了") || userMessage.toLowerCase().includes("cancel") || userMessage.includes("停");
+      if (cancelled) {
+        vibeSessions.delete(userId);
+        return ctx.reply("好的，已取消。需要时随时发 /vibe 重新开始。");
+      }
+      // If it looks like a question, exit session and answer normally
+      const isQuestion = userMessage.includes("吗") || userMessage.includes("？") || userMessage.includes("?") || userMessage.includes("怎么") || userMessage.includes("什么") || userMessage.includes("能不能") || userMessage.includes("如何");
+      if (isQuestion) {
+        vibeSessions.delete(userId);
+        // fall through to normal chat below
+      } else {
+        const confirmed = userMessage.includes("确认") || userMessage.toLowerCase().includes("ok") || userMessage.includes("好") || userMessage.includes("开始") || userMessage.includes("继续");
+        if (!confirmed) {
+          session.idea = userMessage; // treat as updated idea
+        }
+          session.step = "building";
+        vibeSessions.set(userId, session);
+        await ctx.reply("⚙️ 开始生成项目...请稍等 60-120 秒");
+        await ctx.sendChatAction("typing");
+        // fall through to building block below
+      }
+    }
+
+    if (session.step === "building" && session.step !== "details") {
+      // Already set to building by confirm step - run generation now
+      if (session.stack) { // only if stack is already set (from URL flow)
+        try {
+          await ctx.reply("⚙️ [1/3] 生成代码中...");
+          const files = await generateProjectFiles(session.idea, session.stack, session.details || "");
+          await ctx.reply("✅ 生成了 " + Object.keys(files).length + " 个文件");
+          await ctx.reply("🔍 [2/3] 代码审查中...");
+          const reviewedFiles = await reviewAndFixFiles(files, session.idea, session.stack);
+          await ctx.reply("✅ 审查完成，共 " + Object.keys(reviewedFiles).length + " 个文件准备就绪");
+          await ctx.reply("📦 [3/3] 推送到 GitHub 中...");
+          const ghUser = await getGitHubUser();
+          const owner = ghUser.login;
+          const _slug = session.idea.toLowerCase().replace(/[^a-z0-9 ]/g, " ").trim().split(/ +/).filter(function(w){return w.length>0;}).slice(0,4).join("-"); const repoName = (_slug||"project") + "-" + Date.now().toString().slice(-4);
+          await createGitHubRepo(repoName, session.idea);
+          await new Promise(function(r) { setTimeout(r, 3000); });
+          const validFiles = {};
+          Object.entries(reviewedFiles).forEach(function(e) { if (e[1] && e[1].length > 0) validFiles[e[0]] = e[1]; });
+          const repoUrl = await pushFilesToGitHub(owner, repoName, validFiles);
+          vibeSessions.delete(userId);
+          const fileList = Object.keys(validFiles).map(function(f) { return "- " + f; }).join("\n");
+          await ctx.reply("🎉 完成！\n\n📦 GitHub: " + repoUrl + "\n\n文件:\n" + fileList + "\n\n下一步:\n1. Railway → New Project → Deploy from GitHub\n2. 选择 " + repoName + "\n3. 部署完成 ✅");
+        } catch (err) {
+          vibeSessions.delete(userId);
+          await ctx.reply("生成失败: " + err.message + "\n\n请重新发 /vibe 再试。");
+        }
+        return;
+      }
+    }
+
+    if (false) { // skip dummy
+    } else if (session.step === "stack") {
       let stack = userMessage;
-      if (userMessage.toLowerCase().includes("帮我选") || userMessage.toLowerCase().includes("你选")) {
+      if (userMessage.includes("帮我选") || userMessage.includes("你选")) {
         stack = "Node.js + Express";
       }
       session.stack = stack;
@@ -1626,7 +1807,7 @@ bot.on("text", async function(ctx) {
       session.details = userMessage;
       session.step = "building";
       vibeSessions.set(userId, session);
-      await ctx.reply("⚙️ 开始生成项目...请稍等 30-60 秒");
+      await ctx.reply("⚙️ 开始生成项目...请稍等 60-120 秒");
       await ctx.sendChatAction("typing");
 
       try {
@@ -1647,13 +1828,18 @@ bot.on("text", async function(ctx) {
         await ctx.reply("📦 [3/3] 推送到 GitHub 中...");
         const ghUser = await getGitHubUser();
         const owner = ghUser.login;
-        const repoName = session.idea.toLowerCase().replace(/[^a-z0-9\s]/g, "").trim().split(/\s+/).slice(0, 4).join("-") + "-" + Date.now().toString().slice(-4);
+        const _slug = session.idea.toLowerCase().replace(/[^a-z0-9 ]/g, " ").trim().split(/ +/).filter(function(w){return w.length>0;}).slice(0,4).join("-"); const repoName = (_slug||"project") + "-" + Date.now().toString().slice(-4);
 
         await createGitHubRepo(repoName, session.idea);
-        // Filter out empty files
+        await new Promise(function(r) { setTimeout(r, 3000); });
+        // Log file sizes for debugging
+        Object.entries(reviewedFiles).forEach(function(entry) {
+          console.log("Vibe file:", entry[0], "->", (entry[1] || "").length, "chars");
+        });
+
         const validFiles = {};
         Object.entries(reviewedFiles).forEach(function(entry) {
-          if (entry[1] && entry[1].trim().length > 10) validFiles[entry[0]] = entry[1];
+          if (entry[1] && entry[1].length > 0) validFiles[entry[0]] = entry[1];
         });
 
         if (Object.keys(validFiles).length === 0) {
@@ -1778,6 +1964,7 @@ bot.on("text", async function(ctx) {
 // ── 处理图片 ──────────────────────────────────────────────────────────────────
 // Cache for photo media groups
 const photoGroupCache = new Map();
+const mixedGroupCache = new Map(); // unified cache for photos+docs mixed groups
 
 
 async function processMultiplePhotos(ctx, userId, photos, caption) {
@@ -1808,24 +1995,82 @@ async function processMultiplePhotos(ctx, userId, photos, caption) {
   }
 }
 
+
+// Process mixed group: photos + files together
+async function processMixedGroup(ctx, userId, photos, docs, caption) {
+  await ctx.reply("🔍 分析 " + photos.length + " 张图片 + " + docs.length + " 个文件...");
+  await ctx.sendChatAction("typing");
+  const instruction = caption || "综合分析这些图片和文件，给出完整总结。";
+  const contentParts = [{ type: "text", text: instruction + "\n\n以下是所有内容：" }];
+
+  // Add photos
+  for (let i = 0; i < photos.length; i++) {
+    try {
+      const file = await ctx.telegram.getFile(photos[i].file_id);
+      const url = "https://api.telegram.org/file/bot" + BOT_TOKEN + "/" + file.file_path;
+      const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
+      contentParts.push({ type: "text", text: "[图片 " + (i+1) + "]" });
+      contentParts.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: buf.toString("base64") } });
+    } catch(e) { console.log("Photo fetch error:", e.message); }
+  }
+
+  // Add docs
+  for (const doc of docs) {
+    try {
+      const fileLink = await withRetry(function() { return ctx.telegram.getFileLink(doc.file_id); });
+      const response = await fetch(fileLink.href);
+      const fname = doc.file_name || "file";
+      const mime = doc.mime_type || "";
+      if (mime === "application/pdf") {
+        const buf = Buffer.from(await response.arrayBuffer());
+        contentParts.push({ type: "text", text: "[PDF: " + fname + "]" });
+        contentParts.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: buf.toString("base64") } });
+      } else {
+        const text = await response.text();
+        contentParts.push({ type: "text", text: "[文件: " + fname + "]\n" + text.substring(0, 4000) });
+      }
+    } catch(e) { console.log("Doc fetch error:", e.message); }
+  }
+
+  try {
+    const systemPrompt = await buildSystemPrompt(userId, instruction);
+    const res = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: "user", content: contentParts }]
+    });
+    const reply = (res.content[0] || {}).text || "分析失败";
+    await saveMessage(userId, "user", "[混合文件 " + photos.length + "图+" + docs.length + "文件] " + instruction);
+    await saveMessage(userId, "assistant", reply.substring(0, 500));
+    await sendLongMessage(ctx, reply);
+  } catch(e) {
+    await ctx.reply("分析失败: " + e.message);
+  }
+}
+
 bot.on("photo", async function(ctx) {
   const userId = ctx.from.id;
   const mediaGroupId = ctx.message.media_group_id;
 
   if (mediaGroupId) {
-    // Collect all photos in group, then process together
-    if (!photoGroupCache.has(mediaGroupId)) {
-      photoGroupCache.set(mediaGroupId, { photos: [], caption: ctx.message.caption || "", userId, ctx });
+    // Use unified mixed group cache
+    if (!mixedGroupCache.has(mediaGroupId)) {
+      mixedGroupCache.set(mediaGroupId, { photos: [], docs: [], caption: ctx.message.caption || "", userId, ctx });
       setTimeout(async function() {
-        const group = photoGroupCache.get(mediaGroupId);
-        photoGroupCache.delete(mediaGroupId);
-        if (!group || group.photos.length === 0) return;
-        await processMultiplePhotos(group.ctx, group.userId, group.photos, group.caption);
+        const group = mixedGroupCache.get(mediaGroupId);
+        mixedGroupCache.delete(mediaGroupId);
+        if (!group) return;
+        if (group.photos.length > 0 && group.docs.length === 0) {
+          await processMultiplePhotos(group.ctx, group.userId, group.photos, group.caption);
+        } else if (group.docs.length > 0 && group.photos.length === 0) {
+          await processMultipleDocs(group.ctx, group.userId, group.docs, group.caption);
+        } else if (group.photos.length > 0 && group.docs.length > 0) {
+          await processMixedGroup(group.ctx, group.userId, group.photos, group.docs, group.caption);
+        }
       }, 1500);
     }
-    // Always take the largest version of each photo
     const largestPhoto = ctx.message.photo[ctx.message.photo.length - 1];
-    photoGroupCache.get(mediaGroupId).photos.push(largestPhoto);
+    mixedGroupCache.get(mediaGroupId).photos.push(largestPhoto);
     return;
   }
   await ctx.sendChatAction("typing");
@@ -1919,17 +2164,22 @@ bot.on("document", async function(ctx) {
 
   // Handle media groups (multiple files sent together)
   if (mediaGroupId) {
-    if (!mediaGroupCache.has(mediaGroupId)) {
-      mediaGroupCache.set(mediaGroupId, { docs: [], caption: ctx.message.caption || "", userId: ctx.from.id, ctx });
-      // Wait for all files in the group, then process
+    if (!mixedGroupCache.has(mediaGroupId)) {
+      mixedGroupCache.set(mediaGroupId, { photos: [], docs: [], caption: ctx.message.caption || "", userId: ctx.from.id, ctx });
       setTimeout(async function() {
-        const group = mediaGroupCache.get(mediaGroupId);
-        mediaGroupCache.delete(mediaGroupId);
-        if (!group || group.docs.length === 0) return;
-        await processMultipleDocs(group.ctx, group.userId, group.docs, group.caption);
+        const group = mixedGroupCache.get(mediaGroupId);
+        mixedGroupCache.delete(mediaGroupId);
+        if (!group) return;
+        if (group.photos.length > 0 && group.docs.length === 0) {
+          await processMultiplePhotos(group.ctx, group.userId, group.photos, group.caption);
+        } else if (group.docs.length > 0 && group.photos.length === 0) {
+          await processMultipleDocs(group.ctx, group.userId, group.docs, group.caption);
+        } else if (group.photos.length > 0 && group.docs.length > 0) {
+          await processMixedGroup(group.ctx, group.userId, group.photos, group.docs, group.caption);
+        }
       }, MEDIA_GROUP_WAIT_MS);
     }
-    mediaGroupCache.get(mediaGroupId).docs.push(doc);
+    mixedGroupCache.get(mediaGroupId).docs.push(doc);
     return;
   }
 
@@ -1970,10 +2220,52 @@ bot.on("document", async function(ctx) {
     const textMimes = ["text/", "application/json", "application/javascript", "application/x-python"];
     const textExts = [".log", ".txt", ".csv", ".json", ".js", ".py", ".ts", ".sh", ".md", ".yaml", ".yml", ".env", ".cjs", ".mjs"];
     const fileName = doc.file_name || "";
+    const isZip = mime === "application/zip" || mime === "application/x-zip-compressed" || fileName.toLowerCase().endsWith(".zip");
     const isTextFile = textMimes.some(function(m) { return mime.startsWith(m); }) ||
                        textExts.some(function(e) { return fileName.toLowerCase().endsWith(e); });
 
-    if (isTextFile) {
+    if (isZip) {
+      const userId = ctx.from.id;
+      await ctx.reply("📦 收到 zip 文件，解压分析中...");
+      try {
+        const fileLink = await withRetry(function() { return ctx.telegram.getFileLink(doc.file_id); });
+        const response = await fetch(fileLink.href);
+        const arrayBuf = await response.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        // Use JSZip
+        const JSZip = require("jszip");
+        const zip = await JSZip.loadAsync(buf);
+        const fileList = Object.keys(zip.files).filter(function(n) { return !zip.files[n].dir; });
+        // Read text files inside (up to 10 files, 3000 chars each)
+        let codeContent = "";
+        let readCount = 0;
+        for (const name of fileList) {
+          if (readCount >= 10) break;
+          const ext = name.split(".").pop().toLowerCase();
+          if (["js","ts","py","json","md","txt","cjs","mjs","env","yaml","yml","sh","sol","rs","go","jsx","tsx","html","css"].includes(ext)) {
+            try {
+              const text = await zip.files[name].async("string");
+              codeContent += "\n\n=== " + name + " ===\n" + text.substring(0, 3000);
+              readCount++;
+            } catch(e) {}
+          }
+        }
+        const summary = "ZIP: " + fileName + "\n文件 (" + fileList.length + " 个):\n" + fileList.slice(0, 30).join("\n") + (fileList.length > 30 ? "\n..." : "");
+        const prompt = summary + (codeContent ? "\n\n内容预览:" + codeContent.substring(0, 8000) : "") + "\n\n请分析这个项目的结构、用途、技术栈，以及发现的问题或改进点。用中文回答。";
+        const res = await anthropic.messages.create({
+          model: MAIN_MODEL, max_tokens: 2000,
+          messages: [{ role: "user", content: prompt }]
+        });
+        const analysis = (res.content[0] || {}).text || "";
+        await sendLongMessage(ctx, "📦 **" + fileName + " 分析**\n\n" + analysis);
+      } catch(err) {
+        if (err.message && err.message.includes("Cannot find module")) {
+          await ctx.reply("需要安装 jszip 依赖。请在 package.json 加 \"jszip\" 然后重新部署。");
+        } else {
+          await ctx.reply("Zip 处理失败: " + err.message);
+        }
+      }
+    } else if (isTextFile) {
       const userId = ctx.from.id;
       await ctx.sendChatAction("typing");
       try {
@@ -2047,12 +2339,48 @@ bot.on("document", async function(ctx) {
         await ctx.reply("文件处理失败: " + err.message);
       }
     } else {
-      await ctx.reply("暂不支持此文件格式。支持：PDF、log、txt、csv、json、js、py 等文字文件。");
+      // Try docx/xlsx with basic extraction
+      if (fileName.toLowerCase().endsWith(".docx") || fileName.toLowerCase().endsWith(".xlsx")) {
+        await ctx.reply("📄 尝试读取 " + fileName + "...");
+        try {
+          const fileLink2 = await withRetry(function() { return ctx.telegram.getFileLink(doc.file_id); });
+          const buf2 = Buffer.from(await (await fetch(fileLink2.href)).arrayBuffer());
+          let extractedText = "";
+          if (fileName.toLowerCase().endsWith(".docx")) {
+            const mammoth = require("mammoth");
+            const result2 = await mammoth.extractRawText({ buffer: buf2 });
+            extractedText = result2.value;
+          } else {
+            const XLSX = require("xlsx");
+            const wb = XLSX.read(buf2, { type: "buffer" });
+            wb.SheetNames.forEach(function(name) {
+              extractedText += "=== " + name + " ===\n";
+              extractedText += XLSX.utils.sheet_to_csv(wb.Sheets[name]) + "\n";
+            });
+          }
+          if (extractedText.length > 0) {
+            const res2 = await anthropic.messages.create({
+              model: MAIN_MODEL, max_tokens: 2000,
+              messages: [{ role: "user", content: "分析这个文件的内容，用中文总结主要信息：\n\n文件: " + fileName + "\n\n" + extractedText.substring(0, 8000) }]
+            });
+            await sendLongMessage(ctx, "📄 **" + fileName + "**\n\n" + ((res2.content[0] || {}).text || ""));
+          } else {
+            await ctx.reply("文件内容为空或无法读取");
+          }
+        } catch(err2) {
+          await ctx.reply("读取失败 (可能需要安装 mammoth/xlsx): " + err2.message);
+        }
+      } else {
+        await ctx.reply("暂不支持此文件格式。支持：PDF、ZIP、DOCX、XLSX、图片、代码文件、txt、csv、json 等");
+      }
     }
   }
 });
 
 // ── 启动 ──────────────────────────────────────────────────────────────────────
+// Start daily briefing scheduler
+scheduleDailyBriefing();
+
 async function launch() {
   if (WEBHOOK_URL) {
     const app = express();
@@ -2072,31 +2400,34 @@ async function launch() {
 
 // Set bot command menu
 bot.telegram.setMyCommands([
-  { command: "memory", description: "📊 完整记忆总览" },
-  { command: "soul", description: "👤 查看 soul.md" },
-  { command: "projects", description: "📁 查看项目" },
-  { command: "tasks", description: "✅ 查看任务" },
-  { command: "notes", description: "📝 查看笔记" },
-  { command: "note", description: "📝 添加笔记" },
-  { command: "summaries", description: "📋 查看对话摘要" },
-  { command: "setsoul", description: "✏️ 更新 soul.md" },
-  { command: "setprojects", description: "✏️ 更新项目" },
-  { command: "settasks", description: "✏️ 更新任务" },
+  { command: "help", description: "❓ 所有命令列表" },
+  { command: "price", description: "💰 加密货币价格 /price BTC" },
+  { command: "translate", description: "🌐 翻译 /translate 英文 内容" },
+  { command: "improve", description: "✨ 润色改写文字" },
+  { command: "brainstorm", description: "🧠 头脑风暴分析" },
+  { command: "remind", description: "⏰ 设置提醒 /remind 30m 内容" },
   { command: "imagine", description: "🎨 AI 图片生成 /imagine [描述]" },
-  { command: "fix", description: "🔧 修改现有代码文件" },
-  { command: "save", description: "💾 保存代码版本 /save v11" },
-  { command: "versions", description: "📦 查看所有保存版本" },
-  { command: "load", description: "📂 加载代码版本 /load v11" },
-  { command: "vibe", description: "🚀 建完整项目并推送 GitHub" },
-  { command: "vibestop", description: "⏹ 退出 Vibe 模式" },
-  { command: "deploy", description: "🚀 自动部署到 Railway" },
+  { command: "vibe", description: "🚀 建项目推 GitHub（可发赏金链接）" },
+  { command: "deploy", description: "🚂 部署到 Railway /deploy [GitHub链接]" },
+  { command: "fix", description: "🔧 修改代码文件" },
+  { command: "explain", description: "💡 解释代码逻辑" },
+  { command: "review", description: "🔍 代码审查评分" },
+  { command: "test", description: "🧪 生成测试用例" },
+  { command: "save", description: "💾 保存代码版本 /save v1" },
+  { command: "versions", description: "📦 查看所有版本" },
+  { command: "load", description: "📂 加载版本 /load v1" },
+  { command: "template", description: "📋 Prompt模板 save/use/list" },
+  { command: "export", description: "📤 导出聊天记录" },
+  { command: "memory", description: "🧠 完整记忆总览" },
+  { command: "soul", description: "👤 查看个人档案" },
+  { command: "note", description: "📝 添加笔记 /note 内容" },
+  { command: "notes", description: "📝 查看所有笔记" },
   { command: "weekly", description: "📊 本周活动总结" },
-  { command: "stats", description: "📊 Token 使用统计和费用" },
+  { command: "stats", description: "📊 Token使用统计" },
   { command: "pipeline", description: "🤖 手动触发赏金扫描" },
-  { command: "pipelinestatus", description: "📡 查看 Pipeline 状态" },
+  { command: "pipelinestatus", description: "📡 Pipeline状态" },
   { command: "forget", description: "🗑 清除对话历史" },
-  { command: "reset", description: "⚠️ 清除所有内容" },
-  { command: "help", description: "❓ 查看所有命令" }
+  { command: "reset", description: "⚠️ 重置所有内容" }
 ]).catch(console.error);
 
 // PDF 文件处理
@@ -2189,9 +2520,25 @@ bot.on("channel_post", async function(ctx) {
     const reward = getLine("💰");
     const typeRaw = getLine("🏷");
 
-    // Bug fix 4: extract URL more reliably
-    const urlMatch = text.match(/https?:\/\/[^ \t\r\n]+/);
-    const url = urlMatch ? urlMatch[0] : "";
+    // Extract URL: try entities first (most reliable), then regex
+    let url = "";
+    if (post.entities) {
+      const urlEntity = post.entities.find(function(e) {
+        return e.type === "url" || e.type === "text_link";
+      });
+      if (urlEntity) {
+        if (urlEntity.type === "text_link") {
+          url = urlEntity.url;
+        } else {
+          url = text.substring(urlEntity.offset, urlEntity.offset + urlEntity.length);
+        }
+      }
+    }
+    // Fallback: regex - allow all URL chars including Chinese-safe unicode
+    if (!url) {
+      const urlMatch = text.match(/https?:\/\/[^\s]+/);
+      url = urlMatch ? urlMatch[0].replace(/[.,!?)\]]+$/, "") : "";
+    }
 
     if (!title || !url) {
       console.log("Skipping - missing title or URL");
@@ -2239,6 +2586,10 @@ bot.on("channel_post", async function(ctx) {
       await executeBounty(bounty, scoring, bot, chatId);
     }
   } catch (err) {
+    if (err.message && err.message.includes("429")) {
+      console.log("Channel 429, skipping bounty");
+      return;
+    }
     console.error("Channel bounty error:", err.message);
   }
 });
@@ -2451,28 +2802,48 @@ async function scoreBounty(bounty) {
 // Execute bounty based on type
 async function executeBounty(bounty, scoring, bot, chatId) {
   try {
+    // Fetch full bounty page for all types
+    let fullDesc = bounty.description || "";
+    try {
+      const pageRes = await fetch(bounty.url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      if (pageRes.ok) {
+        const html = await pageRes.text();
+        fullDesc = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").substring(0, 4000);
+      }
+    } catch(e) { console.log("Page fetch failed:", e.message); }
+
     if (scoring.type === "content") {
       await bot.telegram.sendMessage(chatId, "✍️ 开始生成内容类提交...");
-      // Fetch full bounty details
-      let fullDesc = bounty.description;
-      try {
-        const pageRes = await fetch(bounty.url, { headers: { "User-Agent": "Mozilla/5.0" } });
-        const html = await pageRes.text();
-        const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").substring(0, 4000);
-        fullDesc = text;
-      } catch (e) {}
-
       const contentRes = await anthropic.messages.create({
-        model: MAIN_MODEL,
-        max_tokens: 4096,
+        model: MAIN_MODEL, max_tokens: 4096,
         messages: [{ role: "user", content: "Write a complete submission for this bounty:\n\nBounty: " + bounty.title + "\nDeliverable: " + scoring.deliverable + "\nDetails: " + fullDesc.substring(0, 2000) + "\n\nWrite in a professional, engaging style. Make it submission-ready." }]
       });
-      const content = (contentRes.content[0] || {}).text || "";
-      const buf = Buffer.from("BOUNTY: " + bounty.title + "\nURL: " + bounty.url + "\n\n" + content, "utf-8");
+      const contentText = (contentRes.content[0] || {}).text || "";
+      const buf = Buffer.from("BOUNTY: " + bounty.title + "\nURL: " + bounty.url + "\n\n" + contentText, "utf-8");
       await bot.telegram.sendDocument(chatId, { source: buf, filename: "submission_" + bounty.platform + ".txt" }, { caption: "📄 内容已生成，去这里提交: " + bounty.url });
 
     } else if (scoring.type === "dev" || scoring.type === "hackathon") {
-      await bot.telegram.sendMessage(chatId, "💻 开发类任务 — 用 /vibe 生成项目：\n\n发送: /vibe\n然后描述: " + bounty.title + "\n\n或直接告诉我开始，我帮你生成。");
+      const bountyContext = "Title: " + bounty.title + "\nPlatform: " + bounty.platform + "\nPrize: " + (bounty.prize || "unknown") + "\nURL: " + bounty.url + "\nDescription: " + (bounty.description || "").substring(0, 2000) + (fullDesc ? "\n\nFull details:\n" + fullDesc.substring(0, 3000) : "");
+
+      // Pre-fill session but DON'T auto-start — wait for user confirmation
+      vibeSessions.set(chatId, {
+        step: "confirm",
+        idea: bounty.title,
+        stack: "Node.js",
+        details: bountyContext,
+        bountyDetails: bountyContext,
+        url: bounty.url
+      });
+
+      const analyzeRes = await anthropic.messages.create({
+        model: FAST_MODEL, max_tokens: 600,
+        messages: [{ role: "user", content: "Analyze this bounty and suggest the best project to build:\n\n" + bountyContext + "\n\nReply in Chinese with:\n1. 主题理解\n2. 推荐项目方向\n3. 推荐技术栈\n4. 核心功能（3-4个）\nBe concise and practical." }]
+      });
+      const suggestion = (analyzeRes.content[0] || {}).text || "";
+      await bot.telegram.sendMessage(chatId,
+        "💻 **开发类赏金**\n\n" + suggestion +
+        "\n\n---\n✅ 发 **确认** → 自动生成项目并推送 GitHub\n❌ 发 **取消** → 忽略此赏金\n✏️ 或直接告诉我想做什么"
+      );
 
     } else if (scoring.type === "audit") {
       await bot.telegram.sendMessage(chatId, "🔍 开始代码审计分析...");
@@ -2488,6 +2859,12 @@ async function executeBounty(bounty, scoring, bot, chatId) {
       await bot.telegram.sendDocument(chatId, { source: buf, filename: "audit_" + bounty.platform + ".txt" }, { caption: "🔍 审计报告模板已生成。提交至: " + bounty.url });
     }
   } catch (err) {
+    if (err.message && err.message.includes("429")) {
+      console.log("Rate limited, retrying in 10s...");
+      await new Promise(function(r) { setTimeout(r, 10000); });
+      try { await executeBounty(bounty, scoring, bot, chatId); } catch(e2) {}
+      return;
+    }
     console.error("Execute bounty error:", err.message);
     await bot.telegram.sendMessage(chatId, "执行失败: " + err.message);
   }
@@ -2588,6 +2965,305 @@ async function runBountyPipeline(bot) {
 }
 
 // Manual trigger command
+
+
+// ── 新增功能命令 ──────────────────────────────────────────────────────────────
+
+// /translate - 翻译
+bot.command("translate", async function(ctx) {
+  const args = ctx.message.text.split(" ");
+  const lang = args[1] || "English";
+  const text = args.slice(2).join(" ");
+  if (!text) return ctx.reply("用法: /translate 英文 你想翻译的内容\n例如: /translate 英文 你好世界");
+  await ctx.sendChatAction("typing");
+  try {
+    const res = await anthropic.messages.create({
+      model: FAST_MODEL, max_tokens: 1000,
+      messages: [{ role: "user", content: "翻译成" + lang + "，只输出翻译结果，不要解释:\n\n" + text }]
+    });
+    await ctx.reply("🌐 " + ((res.content[0] || {}).text || ""));
+  } catch(e) { await ctx.reply("翻译失败: " + e.message); }
+});
+
+// /improve - 润色改写
+bot.command("improve", async function(ctx) {
+  const text = ctx.message.text.split(" ").slice(1).join(" ");
+  if (!text) return ctx.reply("用法: /improve 你要润色的文字");
+  await ctx.sendChatAction("typing");
+  try {
+    const res = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 2000,
+      messages: [{ role: "user", content: "请润色改写以下文字，保持原意但更专业、流畅。同时提供两个版本：简洁版和详细版。\n\n" + text }]
+    });
+    await sendLongMessage(ctx, "✨ **润色结果**\n\n" + ((res.content[0] || {}).text || ""));
+  } catch(e) { await ctx.reply("润色失败: " + e.message); }
+});
+
+// /brainstorm - 头脑风暴
+bot.command("brainstorm", async function(ctx) {
+  const topic = ctx.message.text.split(" ").slice(1).join(" ");
+  if (!topic) return ctx.reply("用法: /brainstorm 你的话题或问题");
+  await ctx.sendChatAction("typing");
+  try {
+    const res = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 2000,
+      messages: [{ role: "user", content: "对以下话题做结构化头脑风暴分析。用中文输出，格式：\n1. 核心概念分解\n2. 5个创意方向（每个附简短说明）\n3. 潜在风险/挑战\n4. 推荐下一步行动\n\n话题: " + topic }]
+    });
+    await sendLongMessage(ctx, "🧠 **头脑风暴: " + topic + "**\n\n" + ((res.content[0] || {}).text || ""));
+  } catch(e) { await ctx.reply("失败: " + e.message); }
+});
+
+// /explain - 解释代码
+bot.command("explain", async function(ctx) {
+  const code = ctx.message.text.split("\n").slice(1).join("\n") || ctx.message.text.split(" ").slice(1).join(" ");
+  if (!code.trim()) return ctx.reply("用法: 发 /explain 然后换行粘贴代码");
+  await ctx.sendChatAction("typing");
+  try {
+    const res = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 2000,
+      messages: [{ role: "user", content: "用中文解释以下代码的逻辑和功能，不要修改，只解释：\n\n" + code }]
+    });
+    await sendLongMessage(ctx, "💡 **代码解释**\n\n" + ((res.content[0] || {}).text || ""));
+  } catch(e) { await ctx.reply("失败: " + e.message); }
+});
+
+// /review - 代码审查
+bot.command("review", async function(ctx) {
+  const code = ctx.message.text.split("\n").slice(1).join("\n") || ctx.message.text.split(" ").slice(1).join(" ");
+  if (!code.trim()) return ctx.reply("用法: 发 /review 然后换行粘贴代码");
+  await ctx.sendChatAction("typing");
+  try {
+    const res = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 2000,
+      messages: [{ role: "user", content: "对以下代码做专业代码审查，用中文输出：\n1. 整体评分（1-10）\n2. 优点\n3. 问题/Bug\n4. 安全隐患\n5. 改进建议\n\n" + code }]
+    });
+    await sendLongMessage(ctx, "🔍 **代码审查**\n\n" + ((res.content[0] || {}).text || ""));
+  } catch(e) { await ctx.reply("失败: " + e.message); }
+});
+
+// /test - 生成测试用例
+bot.command("test", async function(ctx) {
+  const code = ctx.message.text.split("\n").slice(1).join("\n") || ctx.message.text.split(" ").slice(1).join(" ");
+  if (!code.trim()) return ctx.reply("用法: 发 /test 然后换行粘贴代码");
+  await ctx.sendChatAction("typing");
+  try {
+    const res = await anthropic.messages.create({
+      model: MAIN_MODEL, max_tokens: 3000,
+      messages: [{ role: "user", content: "为以下代码生成完整的测试用例（包括正常情况、边界情况、错误情况）。输出可直接运行的测试代码：\n\n" + code }]
+    });
+    const testCode = (res.content[0] || {}).text || "";
+    const buf = Buffer.from(testCode, "utf-8");
+    const ts = new Date().toISOString().slice(11,16).replace(":","");
+    await withRetry(function() {
+      return ctx.replyWithDocument({ source: buf, filename: "test_" + ts + ".js" }, { caption: "✅ 测试用例已生成" });
+    });
+  } catch(e) { await ctx.reply("失败: " + e.message); }
+});
+
+// /export - 导出聊天记录
+bot.command("export", async function(ctx) {
+  const userId = ctx.from.id;
+  await ctx.sendChatAction("upload_document");
+  try {
+    const history = await getHistory(userId);
+    const summaries = await getSummaries(userId);
+    let text = "=== Claude 大神 对话记录 ===\n";
+    text += "导出时间: " + new Date().toLocaleString("zh-CN") + "\n\n";
+    if (summaries.length > 0) {
+      text += "=== 对话摘要 ===\n";
+      summaries.forEach(function(s) { text += "- " + s.content + "\n"; });
+      text += "\n";
+    }
+    text += "=== 最近对话 ===\n";
+    history.forEach(function(m) {
+      text += (m.role === "user" ? "【我】" : "【Claude】") + " " + m.content + "\n\n";
+    });
+    const buf = Buffer.from(text, "utf-8");
+    const date = new Date().toISOString().slice(0,10);
+    await withRetry(function() {
+      return ctx.replyWithDocument({ source: buf, filename: "chat_export_" + date + ".txt" }, { caption: "📤 对话记录已导出" });
+    });
+  } catch(e) { await ctx.reply("导出失败: " + e.message); }
+});
+
+// /price - 加密货币价格
+bot.command("price", async function(ctx) {
+  const coin = ctx.message.text.split(" ").slice(1).join(" ").trim().toLowerCase() || "bitcoin";
+  await ctx.sendChatAction("typing");
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=" + coin + "&vs_currencies=usd,btc&include_24hr_change=true&include_market_cap=true");
+    const data = await res.json();
+    if (!data[coin]) {
+      // Try search by symbol
+      const searchRes = await fetch("https://api.coingecko.com/api/v3/search?query=" + coin);
+      const searchData = await searchRes.json();
+      const found = searchData.coins && searchData.coins[0];
+      if (found) return ctx.reply("找不到 " + coin + "，你是指: " + found.name + " (" + found.symbol + ")？\n\n用 /price " + found.id + " 查询");
+      return ctx.reply("找不到 " + coin + " 的价格数据");
+    }
+    const p = data[coin];
+    const change = (p.usd_24h_change || 0).toFixed(2);
+    const arrow = change > 0 ? "📈" : "📉";
+    const mcap = p.usd_market_cap ? " | 市值: $" + (p.usd_market_cap / 1e9).toFixed(2) + "B" : "";
+    await ctx.reply(arrow + " **" + coin.toUpperCase() + "**\n💵 $" + p.usd.toLocaleString() + "\n24h: " + change + "%" + mcap);
+  } catch(e) { await ctx.reply("价格查询失败: " + e.message); }
+});
+
+// /remind - 设置提醒
+const reminders = new Map();
+bot.command("remind", async function(ctx) {
+  const args = ctx.message.text.split(" ").slice(1);
+  if (args.length < 2) return ctx.reply("用法: /remind 30m 提醒内容\n时间格式: 30m / 2h / 1d");
+  const timeStr = args[0];
+  const content = args.slice(1).join(" ");
+  let ms = 0;
+  if (timeStr.endsWith("m")) ms = parseInt(timeStr) * 60 * 1000;
+  else if (timeStr.endsWith("h")) ms = parseInt(timeStr) * 60 * 60 * 1000;
+  else if (timeStr.endsWith("d")) ms = parseInt(timeStr) * 24 * 60 * 60 * 1000;
+  else return ctx.reply("时间格式错误。例子: 30m、2h、1d");
+  if (!ms || ms > 7 * 24 * 60 * 60 * 1000) return ctx.reply("时间范围: 1分钟 - 7天");
+  const userId = ctx.from.id;
+  setTimeout(async function() {
+    try {
+      await ctx.telegram.sendMessage(userId, "⏰ **提醒！**\n\n" + content);
+    } catch(e) {}
+  }, ms);
+  const timeDisplay = timeStr.endsWith("m") ? timeStr.replace("m","") + " 分钟" : timeStr.endsWith("h") ? timeStr.replace("h","") + " 小时" : timeStr.replace("d","") + " 天";
+  await ctx.reply("✅ 提醒已设置！将在 " + timeDisplay + " 后提醒你:\n" + content);
+});
+
+// /template - 保存/使用模板
+const userTemplates = new Map();
+bot.command("template", async function(ctx) {
+  const userId = ctx.from.id;
+  const args = ctx.message.text.split(" ").slice(1);
+  const subCmd = args[0];
+
+  if (subCmd === "save") {
+    const name = args[1];
+    const tmpl = args.slice(2).join(" ");
+    if (!name || !tmpl) return ctx.reply("用法: /template save 名称 模板内容\n例如: /template save intro 我是王大神，帮我写...");
+    if (!userTemplates.has(userId)) userTemplates.set(userId, {});
+    userTemplates.get(userId)[name] = tmpl;
+    return ctx.reply("✅ 模板 [" + name + "] 已保存");
+  }
+  if (subCmd === "use") {
+    const name = args[1];
+    const extra = args.slice(2).join(" ");
+    const tmpls = userTemplates.get(userId) || {};
+    if (!tmpls[name]) return ctx.reply("找不到模板 [" + name + "]。用 /template list 查看所有模板");
+    const prompt = tmpls[name] + (extra ? " " + extra : "");
+    await ctx.sendChatAction("typing");
+    const result = await askClaude(userId, prompt, ctx);
+    if (result && !result.__streamedAlready) await sendLongMessage(ctx, result);
+    return;
+  }
+  if (subCmd === "list" || !subCmd) {
+    const tmpls = userTemplates.get(userId) || {};
+    const names = Object.keys(tmpls);
+    if (names.length === 0) return ctx.reply("还没有保存模板。\n用法: /template save 名称 模板内容");
+    return ctx.reply("📋 **你的模板**:\n" + names.map(function(n) { return "- " + n + ": " + tmpls[n].substring(0,50) + "..."; }).join("\n"));
+  }
+  if (subCmd === "delete") {
+    const name = args[1];
+    const tmpls = userTemplates.get(userId) || {};
+    delete tmpls[name];
+    return ctx.reply("🗑 模板 [" + name + "] 已删除");
+  }
+  await ctx.reply("用法:\n/template save 名称 内容\n/template use 名称 [额外内容]\n/template list\n/template delete 名称");
+});
+
+// /help - 帮助
+bot.command("help", async function(ctx) {
+  const helpText = "🤖 **Claude 大神 — 完整命令列表**\n\n" +
+    "**💬 对话工具**\n" +
+    "/translate [语言] [文字] — 翻译\n" +
+    "/improve [文字] — 润色改写\n" +
+    "/brainstorm [话题] — 头脑风暴分析\n" +
+    "/summarize — 压缩对话历史\n\n" +
+    "**💰 加密/赏金**\n" +
+    "/price [币名] — 实时价格 (BTC/ETH/SOL)\n" +
+    "/vibe — 建项目推 GitHub\n" +
+    "/deploy [GitHub链接] — 部署到 Railway\n" +
+    "/pipeline — 手动触发赏金扫描\n" +
+    "/pipelinestatus — Pipeline 状态\n\n" +
+    "**💻 代码工具**\n" +
+    "/fix — 修改代码文件\n" +
+    "/explain — 解释代码逻辑\n" +
+    "/review — 代码审查评分\n" +
+    "/test — 生成测试用例\n" +
+    "/save [版本名] — 保存代码版本\n" +
+    "/versions — 查看所有版本\n" +
+    "/load [版本名] — 加载版本\n\n" +
+    "**🎨 创作**\n" +
+    "/imagine [描述] — AI 图片生成\n" +
+    "/weekly — 本周活动总结\n\n" +
+    "**🧠 记忆**\n" +
+    "/memory — 完整记忆总览\n" +
+    "/soul — 查看个人档案\n" +
+    "/notes — 查看笔记\n" +
+    "/note [内容] — 添加笔记\n\n" +
+    "**⚙️ 工具**\n" +
+    "/remind [时间] [内容] — 设置提醒 (30m/2h/1d)\n" +
+    "/template save/use/list — 管理 Prompt 模板\n" +
+    "/export — 导出聊天记录\n" +
+    "/stats — Token 使用统计\n" +
+    "/forget — 清除对话历史\n" +
+    "/reset — 重置所有内容\n\n" +
+    "**📎 文件支持**\n" +
+    "PDF、ZIP、DOCX、XLSX、图片、代码文件、txt、csv、json";
+  await sendLongMessage(ctx, helpText);
+});
+
+// URL 自动摘要（非赏金链接，普通对话中发链接）
+async function summarizeUrl(ctx, url) {
+  try {
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").substring(0, 5000);
+    if (text.length < 100) return null;
+    const sumRes = await anthropic.messages.create({
+      model: FAST_MODEL, max_tokens: 500,
+      messages: [{ role: "user", content: "用3-5句话总结这个页面内容，用中文：\n\n" + text }]
+    });
+    return (sumRes.content[0] || {}).text || null;
+  } catch(e) { return null; }
+}
+
+// 每日简报 (凌晨7点 +8 = UTC 23:00)
+function scheduleDailyBriefing() {
+  const now = new Date();
+  const target = new Date();
+  target.setUTCHours(23, 0, 0, 0);
+  if (target <= now) target.setUTCDate(target.getUTCDate() + 1);
+  const delay = target - now;
+  setTimeout(async function() {
+    try {
+      const priceRes = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true");
+      const prices = await priceRes.json();
+      const fmt = function(id, symbol) {
+        const p = prices[id];
+        if (!p) return "";
+        const c = (p.usd_24h_change || 0).toFixed(1);
+        return symbol + ": $" + p.usd.toLocaleString() + " (" + (c > 0 ? "+" : "") + c + "%)";
+      };
+      const msg = "☀️ **每日简报**\n\n**市场价格**\n" +
+        fmt("bitcoin", "BTC") + "\n" +
+        fmt("ethereum", "ETH") + "\n" +
+        fmt("solana", "SOL") + "\n\n" +
+        "**赏金 Pipeline 运行时间**: 凌晨 1-6 点\n" +
+        "今天也要加油！💪";
+      if (PIPELINE_OWNER) {
+        await bot.telegram.sendMessage(PIPELINE_OWNER, msg).catch(function(){});
+      }
+    } catch(e) { console.log("Daily briefing error:", e.message); }
+    scheduleDailyBriefing(); // reschedule next day
+  }, delay);
+  console.log("Daily briefing scheduled in", Math.round(delay/1000/60), "minutes");
+}
 
 bot.command("stats", async function(ctx) {
   const userId = ctx.from.id;
