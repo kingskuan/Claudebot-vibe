@@ -503,7 +503,13 @@ async function autoLearnMemory(userId, userMessage, aiReply) {
     const raw = response.content[0] ? response.content[0].text.trim() : "{}";
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return;
-    const updates = JSON.parse(jsonMatch[0]);
+    let updates;
+    try {
+      updates = JSON.parse(jsonMatch[0]);
+    } catch (e) {
+      console.error("Failed to parse JSON from AI response:", e.message);
+      return;
+    }
 
     if (updates.soul && updates.soul.trim()) await setDoc(userId, "soul", updates.soul.trim());
     if (updates.projects && updates.projects.trim()) await setDoc(userId, "projects", updates.projects.trim());
@@ -892,6 +898,10 @@ bot.help(function(ctx) {
 
 // ── Railway 自动部署 ───────────────────────────────────────────────────────────
 async function railwayDeploy(repoUrl, projectName, envVars) {
+  // Sanitize inputs to prevent GraphQL injection
+  const sanitize = function(str) { return str.replace(/[\\"]/g, ""); };
+  projectName = sanitize(projectName);
+  repoUrl = sanitize(repoUrl);
   const headers = {
     "Authorization": "Bearer " + RAILWAY_API_TOKEN,
     "Content-Type": "application/json"
@@ -936,12 +946,14 @@ async function railwayDeploy(repoUrl, projectName, envVars) {
 
   // Step 4: Set environment variables if provided
   if (envVars && envId) {
-    for (const [key, value] of Object.entries(envVars)) {
+    for (const [rawKey, rawValue] of Object.entries(envVars)) {
+      const safeKey = sanitize(rawKey);
+      const safeValue = sanitize(rawValue);
       await fetch("https://backboard.railway.app/graphql/v2", {
         method: "POST",
         headers,
         body: JSON.stringify({
-          query: `mutation { variableUpsert(input: { projectId: "${projectId}", environmentId: "${envId}", serviceId: "${serviceId}", name: "${key}", value: "${value}" }) }`
+          query: `mutation { variableUpsert(input: { projectId: "${projectId}", environmentId: "${envId}", serviceId: "${serviceId}", name: "${safeKey}", value: "${safeValue}" }) }`
         })
       });
     }
@@ -1674,9 +1686,9 @@ bot.command("remind", async function(ctx) {
   else return ctx.reply("时间格式错误。例子: 30m、2h、1d");
   if (!ms || ms > 7 * 24 * 60 * 60 * 1000) return ctx.reply("时间范围: 1分钟 - 7天");
   // Cap concurrent reminders per user
+  const userId = ctx.from.id;
   const userReminders = Array.from(activeReminders.entries()).filter(function(e){return e[1]===userId;}).length;
   if (userReminders >= 10) return ctx.reply("最多同时10个提醒，请等待之前的提醒触发。");
-  const userId = ctx.from.id;
   setTimeout(async function() {
     try {
       await ctx.telegram.sendMessage(userId, "⏰ **提醒！**\n\n" + content);
